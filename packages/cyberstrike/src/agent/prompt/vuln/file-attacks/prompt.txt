@@ -166,6 +166,35 @@ malicious.php%20
 malicious.php::$DATA (Windows)
 ```
 
+#### Restricted-download / backup exfiltration (whitelist + Poison Null Byte)
+
+A static file-serving path (`/ftp`, `/files`, `/download`, `/static`, `/assets`)
+that only ALLOWS certain download extensions can still leak backups/secrets:
+
+1. **Enumerate the directory** — try backup/secret suffixes on discovered or
+   hinted filenames: `.bak`, `.tar.gz`, `.zip`, `.old`, `.sql`, `.json`, `.md`,
+   `.pdf`, `.log`, `~`. Use names hinted anywhere (JS, comments, error pages).
+2. **Poison Null Byte to defeat the extension whitelist** — append an ALLOWED
+   extension after a null byte so the check sees e.g. `.md` but the OS opens the
+   real file. Try BOTH single and double URL-encoding (frameworks decode once):
+   ```
+   /ftp/package.json.bak%00.md
+   /ftp/package.json.bak%2500.md          (double-encoded — most common bypass)
+   /ftp/eastere.gg%2500.md
+   ```
+3. A 200 returning the raw restricted file = win (forgotten backup / blueprint /
+   confidential-document class). Do this for EVERY static/download dir recon found.
+
+#### Image metadata (EXIF/GPS) & secret scanning
+
+- **EXIF/GPS**: for every served/uploaded image (product photos, avatars,
+  `/assets/**`), read metadata with `exiftool <file>` (or equivalent) — leaked
+  GPS lat/long, timestamps, author reveal geo-stalking / attribution. Report it.
+- **Secret scan**: grep every JS bundle, source-map, JSON response and served
+  document for credential/key shapes: `AKIA[0-9A-Z]{16}`, `AIza[0-9A-Za-z_-]{35}`,
+  `xox[baprs]-`, `-----BEGIN [A-Z ]*PRIVATE KEY-----`, `Bearer [A-Za-z0-9._-]{20,}`,
+  and `(password|secret|api[_-]?key)\s*[:=]`. A live key/credential = report it.
+
 **Testing approach:**
 1. Test double extensions
 2. Test null byte injection

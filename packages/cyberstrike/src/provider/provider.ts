@@ -1143,6 +1143,7 @@ export namespace Provider {
           ...opts,
           // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
           timeout: false,
+          ...(options["tlsRejectUnauthorized"] === false && { tls: { rejectUnauthorized: false } }),
         })
       }
 

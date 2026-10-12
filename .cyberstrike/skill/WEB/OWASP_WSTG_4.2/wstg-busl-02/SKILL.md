@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [business-logic, workflow, abuse, wstg, busl]
 tech_stack: []
 cwe_ids: [CWE-840]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-busl-01, wstg-busl-03]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-busl-01: "Forgeable/replayable requests combined with accepted business-logic violations (negative amounts, unbounded quantities) let an attacker capture one exploited request and replay it indefinitely with maximally damaging values (Critical)"
+  wstg-busl-03: "Forgeable requests combined with missing integrity/signature checks mean an attacker doesn't need to bypass any authenticity control at all — they can fabricate entire transactions from scratch that the server accepts as legitimate (Critical)"
 ---
 
 # wstg-busl-02

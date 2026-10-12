@@ -8,7 +8,7 @@ author: cyberstrike-official
 tags: [recon, fingerprint, enumeration, wstg, info]
 tech_stack: []
 cwe_ids: [CWE-200]
-chains_with: []
+chains_with: [wstg-info-01, wstg-info-02]
 prerequisites: []
 severity_boost: {}
 ---
@@ -423,6 +423,26 @@ while read subdomain; do
 done < $WORDLIST
 ```
 
+### Virtual Host Enumeration (from PayloadsAllTheThings)
+
+Beyond brute-forcing vhost names, fingerprint whether a given `Host` header actually routes to a *different* backend application versus a default catch-all response, and use origin/DNS-history techniques to find the real IP behind a WAF/CDN:
+
+```bash
+# Fingerprint a guessed vhost against the baseline (default) response
+curl -s -H "Host: {target}" http://{target_ip}/ -o baseline.html
+curl -s -H "Host: admin.{target}" http://{target_ip}/ -o test.html
+diff <(wc -c < baseline.html) <(wc -c < test.html)   # different Content-Length = likely different vhost
+
+# VHostFinder - identifies vhosts by response similarity comparison (catches subtle diffs, not just size)
+vhostfinder -u http://{target_ip} -w subdomains.txt
+
+# Origin IP discovery: spray known/candidate hostnames as Host header against IP ranges
+# historically associated with the target, to find the real backend behind Cloudflare/WAF
+prips 93.184.216.0/24 | hakoriginfinder -h https://{target}:443/
+```
+
+Signals that indicate you've hit a distinct virtual host rather than the default site: different page title/branding, different `Content-Length`, a status code other than the baseline (200 vs 403/redirect), a custom error page, or a TLS certificate SAN listing a different hostname than the one requested. Cross-reference DNS history (SecurityTrails, crt.sh) for IPs the target previously pointed to — the origin server often still answers directly on the old IP even after moving behind a CDN/WAF, letting the WAF be bypassed entirely by hitting the origin with the correct `Host` header.
+
 ### Aquatone Pipeline
 
 ```bash
@@ -559,6 +579,7 @@ server {
 - [Gobuster GitHub](https://github.com/OJ/gobuster)
 - [Amass GitHub](https://github.com/owasp-amass/amass)
 - [ffuf GitHub](https://github.com/ffuf/ffuf)
+- [PayloadsAllTheThings - Virtual Hosts](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Virtual%20Hosts)
 
 ### Wordlists
 

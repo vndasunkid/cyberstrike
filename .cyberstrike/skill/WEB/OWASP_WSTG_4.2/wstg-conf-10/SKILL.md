@@ -8,7 +8,7 @@ author: cyberstrike-official
 tags: [misconfiguration, hardening, server, wstg, conf]
 tech_stack: []
 cwe_ids: [CWE-16]
-chains_with: []
+chains_with: [wstg-conf-01, wstg-conf-02]
 prerequisites: []
 severity_boost: {}
 ---

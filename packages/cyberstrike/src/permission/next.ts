@@ -154,6 +154,13 @@ export namespace PermissionNext {
               reject,
             }
             Bus.publish(Event.Asked, info)
+            // auto-reject if client never responds (e.g. disconnected)
+            setTimeout(() => {
+              if (s.pending[id]) {
+                delete s.pending[id]
+                reject(new RejectedError())
+              }
+            }, 10 * 60 * 1000)
           })
         }
         if (rule.action === "allow") continue

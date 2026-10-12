@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [cryptography, tls, ssl, encryption, wstg, cryp]
 tech_stack: []
 cwe_ids: [CWE-311]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-cryp-01, wstg-cryp-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-cryp-01: "Sensitive data reachable over plain HTTP combined with weak/missing HSTS lets an active attacker perform SSL-stripping to force victims onto the unencrypted channel and capture credentials/tokens in cleartext at scale (Critical)"
 ---
 
 # wstg-cryp-03
@@ -244,6 +245,52 @@ tester.generate_report()
 
 ---
 
+## Tools
+
+| Tool               | Description                          | Usage                                        |
+| ------------------ | ------------------------------------- | --------------------------------------------- |
+| **curl**           | Manual HTTP/HTTPS probing            | `curl -sI http://target.com`                  |
+| **testssl.sh**     | Checks HSTS/security headers         | `./testssl.sh --headers target.com`           |
+| **OWASP ZAP**      | Passive scan for mixed content       | Spider + passive scan                         |
+| **Burp Suite**     | Proxy history review for HTTP traffic| Manual review / passive scan                  |
+| **MixedContentScan**| Automated mixed-content crawler      | `mixed-content-scan https://target.com`       |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+TARGET="target.com"
+
+# Is plaintext HTTP reachable at all, and does it redirect?
+curl -sI "http://$TARGET" -o /tmp/http_headers.txt -w "%{http_code} -> %{redirect_url}\n"
+grep -i '^location:' /tmp/http_headers.txt
+
+# Confirm HSTS header and max-age on the HTTPS origin
+curl -sI "https://$TARGET" | grep -i 'strict-transport-security'
+
+# Sensitive endpoints reachable over plain HTTP (credentials/session risk)
+for path in /login /account /api/user /checkout; do
+  code=$(curl -s -o /dev/null -w "%{http_code}" "http://$TARGET$path")
+  echo "http://$TARGET$path -> $code"
+done
+
+# Mixed content grep on a rendered HTTPS page
+curl -s "https://$TARGET/" | grep -oE '(src|href|action)="http://[^"]+"'
+
+# Capture a login POST over HTTP with Wireshark/tcpdump to prove cleartext credentials (authorized testing only)
+sudo tcpdump -i any -A 'tcp port 80 and host '"$TARGET" -w http_capture.pcap
+```
+
+**Result patterns indicating a finding:**
+- `curl -sI http://target.com` returns `200` (not a `301/302/307/308` to `https://`) → HTTP accessible without HTTPS redirect
+- `Location:` header on the 30x response points to `http://` instead of `https://` → insecure redirect
+- `strict-transport-security` header absent, or `max-age` below `31536000` → missing/weak HSTS
+- Grep on rendered HTTPS page returns `src="http://...`, `href="http://...`, or `action="http://...` → mixed content / insecure form submission
+- Captured pcap shows readable `POST /login` body with `username=`/`password=` in cleartext → confirmed cleartext credential transmission
+
+---
+
 ## Remediation Guide
 
 ### Force HTTPS Redirect
@@ -289,6 +336,14 @@ add_header Content-Security-Policy "upgrade-insecure-requests";
 | **CWE-319** | Cleartext Transmission of Sensitive Information |
 | **CWE-311** | Missing Encryption of Sensitive Data            |
 
+
+---
+
+## References
+
+- [OWASP WSTG-CRYP-03: Testing for Sensitive Information Sent via Unencrypted Channels](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/09-Testing_for_Weak_Cryptography/03-Testing_for_Sensitive_Information_Sent_via_Unencrypted_Channels)
+- [OWASP HTTP Strict Transport Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Strict_Transport_Security_Cheat_Sheet.html)
+- [MDN: Mixed Content](https://developer.mozilla.org/en-US/docs/Web/Security/Mixed_content)
 
 ---
 

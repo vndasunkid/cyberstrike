@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [business-logic, workflow, abuse, wstg, busl]
 tech_stack: []
 cwe_ids: [CWE-840]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-busl-02, wstg-busl-03]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-busl-02: "Accepted out-of-range business values (negative quantity, price=0.01) combined with replayable/forgeable requests let an attacker script mass-repetition of a single exploited validation gap — a one-off finding becomes automated, unlimited-scale fraud (Critical)"
+  wstg-busl-03: "Accepted invalid business data combined with missing integrity/signature verification means tampered financial values (price, total, quantity) pass through the entire transaction pipeline completely undetected (Critical)"
 ---
 
 # wstg-busl-01

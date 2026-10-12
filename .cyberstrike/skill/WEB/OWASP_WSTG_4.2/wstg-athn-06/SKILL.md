@@ -8,8 +8,8 @@ author: cyberstrike-official
 tags: [authentication, login, credentials, mfa, wstg, athn]
 tech_stack: []
 cwe_ids: [CWE-613]
-chains_with: []
-prerequisites: []
+chains_with: [wstg-athn-01, wstg-athn-02]
+prerequisites: [wstg-idnt-01, wstg-idnt-02]
 severity_boost: {}
 ---
 

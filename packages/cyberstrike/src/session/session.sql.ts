@@ -107,6 +107,10 @@ export const VulnerabilityTable = sqliteTable(
     // downstream never parses the title prefix. Cleared to NULL on an in-place evidence upgrade.
     candidate: text(),
     duplicate_of: text(), // triage link: this finding is a duplicate of <vuln id>
+    // Bước 2 (plan_fix.md): retest-queue consistency re-checks append here instead of creating a
+    // new INFO row. JSON array of {time, outcome, by} — a re-verification log for THIS finding.
+    // NULL = never re-verified. Column auto-added by reconcile() on next startup (no migration file).
+    verifications: text(),
     position: integer().notNull(),
     ...Timestamps,
   },
@@ -172,6 +176,9 @@ export const RequestTable = sqliteTable(
     response_content_type: text(),
     response_size: integer(),
     processed_response: text(),
+    // Perf (plan_fix.md): hash of the RAW response body — lets the catch-all short-circuit detect
+    // an SPA shell served identically across many GET paths. Auto-added by reconcile() on startup.
+    response_hash: text(),
     ...Timestamps,
   },
   (table) => [

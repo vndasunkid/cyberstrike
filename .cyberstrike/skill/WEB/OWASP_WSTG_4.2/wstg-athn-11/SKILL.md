@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [authentication, login, credentials, mfa, wstg, athn]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-athn-01, wstg-athn-02]
+prerequisites: [wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-athn-01: "Cleartext Credential Interception + MFA Bypass = attacker sniffs valid credentials and the second factor can be skipped entirely (Full Authentication Bypass Despite MFA, Critical)"
+  wstg-athn-02: "Default Credentials + MFA Bypass = trivial credential guess plus no working second factor removes the last barrier to admin/system access (Critical)"
 ---
 
 # wstg-athn-11

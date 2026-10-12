@@ -8,7 +8,7 @@ author: cyberstrike-official
 tags: [misconfiguration, hardening, server, wstg, conf]
 tech_stack: []
 cwe_ids: [CWE-16]
-chains_with: []
+chains_with: [wstg-conf-01, wstg-conf-02]
 prerequisites: []
 severity_boost: {}
 ---
@@ -130,6 +130,39 @@ curl -s https://target.com/clientaccesspolicy.xml | grep -E 'uri="\*"|uri="http:
 | **curl**       | Retrieve policy files | `curl -s url/crossdomain.xml` |
 | **Nikto**      | Web scanner           | Includes RIA policy checks    |
 | **Burp Suite** | Proxy                 | Analyze policy files          |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+TARGET="target.com"
+
+# Retrieve both policy files and check existence/status
+curl -s -o /tmp/crossdomain.xml -w "crossdomain.xml -> %{http_code}\n" "https://$TARGET/crossdomain.xml"
+curl -s -o /tmp/clientaccesspolicy.xml -w "clientaccesspolicy.xml -> %{http_code}\n" "https://$TARGET/clientaccesspolicy.xml"
+
+# Flag wildcard / insecure entries in crossdomain.xml
+grep -E 'domain="\*"|domain="\*\.[^"]*"|secure="false"' /tmp/crossdomain.xml && echo "[VULN] Overly permissive crossdomain.xml"
+
+# Flag wildcard / plain-HTTP entries in clientaccesspolicy.xml
+grep -E 'uri="\*"|uri="http://' /tmp/clientaccesspolicy.xml && echo "[VULN] Overly permissive clientaccesspolicy.xml"
+
+# Nikto quick check (also flags other RIA policy issues)
+nikto -h "https://$TARGET" -Tuning 9
+
+# Also check common alternate/legacy locations
+for path in /crossdomain.xml /clientaccesspolicy.xml /apps/crossdomain.xml /flash/crossdomain.xml; do
+  curl -s -o /dev/null -w "%{http_code}  $path\n" "https://$TARGET$path"
+done
+```
+
+**Result patterns indicating a finding:**
+- `crossdomain.xml` returns HTTP `200` and contains `<allow-access-from domain="*"/>` → allows any domain (High)
+- `crossdomain.xml` contains `secure="false"` → allows access from non-HTTPS origins
+- `clientaccesspolicy.xml` contains `<domain uri="*"/>` or `<domain uri="http://...` → unrestricted/insecure Silverlight cross-domain access
+- `<grant-to><resource path="/" include-subpaths="true"/>` combined with wildcard domain → full-site data exposure to any Flash/Silverlight caller
+- Nikto reports `Cross-domain policy` findings with `+` severity markers → confirms misconfiguration
 
 ---
 

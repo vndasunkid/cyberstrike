@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [session, cookies, csrf, token, wstg, sess]
 tech_stack: []
 cwe_ids: [CWE-384]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-sess-07, wstg-sess-09]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-sess-07: "Missing HttpOnly/Secure + no effective session timeout = a token stolen via XSS or sniffing stays valid indefinitely, maximizing the hijack window (High)"
+  wstg-sess-09: "Missing HttpOnly/Secure directly enables confirmed session hijacking via XSS cookie theft or network sniffing (High)"
 ---
 
 # wstg-sess-02
@@ -396,6 +398,35 @@ analyzer.generate_report()
 | ------------------ | -------------------- |
 | **curl**           | Command-line testing |
 | **Custom scripts** | Automated analysis   |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+# One-line audit of every attribute on every Set-Cookie header
+curl -sI "https://{target}/login" | grep -i '^set-cookie' \
+  | grep -ioE 'secure|httponly|samesite=[a-z]+|path=[^;]+|domain=[^;]+|expires=[^;]+|max-age=[^;]+'
+
+# Vulnerable example (missing everything):
+# Set-Cookie: SESSIONID=abc123; Path=/
+
+# Secure example (target state):
+# Set-Cookie: __Host-SESSIONID=abc123; Secure; HttpOnly; SameSite=Strict; Path=/
+
+# Confirm __Host- prefix enforcement (should be REJECTED if Domain is set or not Secure)
+curl -s -c - "https://{target}/set-test-cookie" -H "Cookie: __Host-test=1; Domain={target}"
+
+# Prove missing HttpOnly is exploitable — read cookie from JS context
+curl -s "https://{target}/" -H "Cookie: SESSIONID=known_value" | grep -o 'document.cookie'
+```
+
+| Detection Pattern | Meaning |
+| --- | --- |
+| `Set-Cookie` header lacks `Secure` | [VULN] Sent in cleartext over HTTP |
+| `Set-Cookie` header lacks `HttpOnly` | [VULN] Readable via `document.cookie` (XSS exfil) |
+| No `SameSite` or `SameSite=None` w/o `Secure` | [VULN] CSRF-exposed |
+| `__Host-` cookie accepted with a `Domain=` attribute | [VULN] Prefix not enforced server-side |
 
 ---
 

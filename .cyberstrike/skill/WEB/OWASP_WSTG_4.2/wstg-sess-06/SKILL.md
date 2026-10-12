@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [session, cookies, csrf, token, wstg, sess]
 tech_stack: []
 cwe_ids: [CWE-613]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-sess-03, wstg-sess-01]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-sess-03: "Broken logout invalidation + confirmed session fixation = attacker's pre-set session stays valid even after the victim logs out, giving persistent unauthorized access (Critical)"
+  wstg-sess-01: "No server-side invalidation on logout + no absolute session expiration in the schema = a leaked or hijacked token remains exploitable indefinitely (High)"
 ---
 
 # wstg-sess-06
@@ -166,6 +168,44 @@ tester.test_logout(
 
 ---
 
+## Tools
+
+| Tool                 | Description             | Usage                                    |
+| --------------------- | ------------------------- | ------------------------------------------ |
+| **Burp Suite**        | Repeater/Proxy            | Replay pre-logout request with old cookie |
+| **OWASP ZAP**         | Automated scanner         | Session management add-on                |
+| **jwt_tool**          | JWT-specific testing      | Check if JWT is blacklisted after logout |
+| **curl**              | Command-line replay       | Scripted invalidation checks             |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+# Full logout invalidation check
+SESSION=$(curl -s -c - -X POST "https://{target}/login" -d "username=test&password=test" | grep -oP "SESSIONID=\K[^;]+")
+curl -s -b "SESSIONID=$SESSION" "https://{target}/logout" -o /dev/null
+curl -s -o /dev/null -w "%{http_code}\n" -b "SESSIONID=$SESSION" "https://{target}/dashboard"
+# 200/"Welcome" => [VULN] session still valid after logout
+
+# Check JWT-based session for revocation/blacklist after logout
+TOKEN="{jwt_token}"
+curl -s -X POST "https://{target}/logout" -H "Authorization: Bearer $TOKEN"
+curl -s -o /dev/null -w "%{http_code}\n" "https://{target}/api/protected" \
+    -H "Authorization: Bearer $TOKEN"
+# 200 => [VULN] JWT not revoked/blacklisted after logout
+
+# Check "remember me" persistent cookie is also cleared
+curl -s -c - -b "remember_token={remember_token}" "https://{target}/logout" | grep -i "remember"
+curl -s -b "remember_token={remember_token}" "https://{target}/dashboard" | grep -qi "welcome" \
+    && echo "[VULN] remember-me token still valid after logout"
+
+# Confirm logout response clears the cookie (Set-Cookie with Max-Age=0 / expired)
+curl -sI -b "SESSIONID=$SESSION" "https://{target}/logout" | grep -i "set-cookie"
+```
+
+---
+
 ## Remediation Guide
 
 ### Proper Logout Implementation
@@ -211,6 +251,13 @@ def logout():
 | CWE ID      | Title                           |
 | ----------- | ------------------------------- |
 | **CWE-613** | Insufficient Session Expiration |
+
+---
+
+## References
+
+- [OWASP WSTG - Testing for Logout Functionality](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/06-Session_Management_Testing/06-Testing_for_Logout_Functionality)
+- [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
 
 
 ---

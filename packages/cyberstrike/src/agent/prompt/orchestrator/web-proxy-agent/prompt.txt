@@ -361,7 +361,13 @@ This is efficient and allows comprehensive testing.
 
 ### Step 7: Process Re-test Queue
 
-Check `web_get_session_context` for pending re-tests (`retest_queue`). If there are high-priority items, the system will feed them as new requests.
+Pending re-tests are automatically dispatched by the system after each ingest completes. When you receive a request prefixed with a `## Re-test Trigger` header:
+- **Skip proxy-analyzer** — architecture for this endpoint is already known
+- **Focus on access control** — dispatch `proxy-tester-authz` at minimum
+- Select additional testers based on trigger type:
+  - `new_role` → authz, idor
+  - `new_credential` → authz, idor, authn
+  - `new_object_value` → idor, authz
 
 ## Decision-Making Examples
 

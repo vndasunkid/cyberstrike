@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [business-logic, workflow, abuse, wstg, busl]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-busl-01, wstg-busl-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-busl-01: "Payment-specific price/quantity manipulation combined with generic business-logic gaps elsewhere (discount >100%, unbounded quantity) compounds into ordering unlimited high-value goods for near-zero cost (Critical)"
+  wstg-busl-02: "An unauthenticated/unsigned payment webhook (forgeable request) combined with price manipulation lets an attacker directly POST a fake 'payment succeeded' event for a manipulated near-zero total — complete payment bypass without touching a real payment gateway (Critical)"
 ---
 
 # wstg-busl-10

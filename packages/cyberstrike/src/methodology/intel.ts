@@ -132,8 +132,8 @@ export namespace Intel {
         .run()
     })
 
-    // Auto-generate VRT checklist
-    const vrtChecks = generateVrtChecklist(input.data.type)
+    // Auto-generate VRT checklist (applicability-filtered by asset — Bước 4)
+    const vrtChecks = generateVrtChecklist(input.data.type, input.data.asset)
     for (const check of vrtChecks) {
       Database.use((db) => {
         db.insert(VrtCheckTable)
@@ -258,8 +258,83 @@ export namespace Intel {
 
   // --- VRT Checklist ---
 
-  export function generateVrtChecklist(entryType: Type): Array<{ category: string; path: string }> {
-    return Phase.VRT_CATEGORIES_BY_TYPE[entryType] ?? []
+  // Bước 4 (plan_fix.md): applicability filter. A static asset (.js/.css/.png/...) serves a fixed
+  // file — it cannot carry a server-side injection in its response, so generating SQLi/XSS/SSTI/
+  // cmd/SSRF/XXE checks for it is wasted testing + coverage noise (a proxy-tester runs a full
+  // payload matrix only to close each as not_applicable). Access-control / info-disclosure checks
+  // still apply (a static file can leak data or be mis-scoped), so those are kept.
+  const INJECTION_CATEGORIES = new Set(["SQLi", "XSS", "SSTI", "Command Injection", "SSRF", "XXE", "NoSQLi"])
+  const STATIC_ASSET_RE = /\.(js|css|png|jpe?g|gif|svg|ico|woff2?|ttf|map|webmanifest|mp4|webp)(\?|#|$)/i
+
+  // Gói 0 (ke_hoach_70.md): suy attack-class TỔNG QUÁT từ HÌNH DẠNG path (không phải tên target).
+  // Một endpoint mang dấu hiệu shape dưới đây được cấp THÊM lớp lỗi tương ứng, để tester bị CỬ đi
+  // đúng chỗ thay vì improvise/bỏ sót. Chỉ dùng category đã được taxonomy + dispatch công nhận.
+  const SHAPE_RULES: Array<{ re: RegExp; cats: Array<{ category: string; path: string }> }> = [
+    {
+      re: /(search|query|filter|lookup|[?&]q=)/i,
+      cats: [
+        { category: "SQLi", path: "Injection > SQL Injection > Search Parameter" },
+        { category: "NoSQLi", path: "Injection > NoSQL Injection > Search Operator" },
+        { category: "XSS", path: "Cross-Site Scripting > Reflected > Search Parameter" },
+      ],
+    },
+    {
+      re: /(login|signin|sign-in|auth|token|session|reset|password|passwd|2fa|otp|verify)/i,
+      cats: [
+        { category: "Auth Bypass", path: "Authentication > Authentication Bypass > Credential Field" },
+        { category: "SQLi", path: "Injection > SQL Injection > Login Field" },
+        { category: "NoSQLi", path: "Injection > NoSQL Injection > Auth Operator" },
+      ],
+    },
+    {
+      re: /(admin|manage|internal|metrics|debug|actuator|console|dashboard)/i,
+      cats: [
+        { category: "Privilege Escalation", path: "Broken Access Control > Privilege Escalation > Admin Function" },
+        { category: "Auth Bypass", path: "Authentication > Forced Browsing > Restricted Path" },
+      ],
+    },
+    {
+      re: /(file|upload|download|attachment|ftp|report|export|backup|blueprint|document|image|photo|avatar|profile)/i,
+      cats: [
+        { category: "File Attacks", path: "File Attacks > Path Traversal > Restricted File Read" },
+        { category: "Info Disclosure", path: "Information Disclosure > Sensitive File Exposure" },
+      ],
+    },
+    {
+      re: /(redirect|url=|returnto|return_to|next=|callback|continue|dest=|target=)/i,
+      cats: [
+        { category: "Open Redirect", path: "Broken Access Control > Open Redirect > URL Parameter" },
+        { category: "SSRF", path: "Server-Side Request Forgery > URL Parameter" },
+      ],
+    },
+    {
+      re: /\/(\d+|\{?id\}?|:id|[0-9a-f]{8}-[0-9a-f]{4})(\/|$|\?)/i,
+      cats: [
+        { category: "IDOR", path: "Broken Access Control > IDOR > Object Reference" },
+        { category: "NoSQLi", path: "Injection > NoSQL Injection > ID Operator" },
+      ],
+    },
+  ]
+
+  function shapeCategories(asset?: string): Array<{ category: string; path: string }> {
+    if (!asset) return []
+    const out: Array<{ category: string; path: string }> = []
+    for (const rule of SHAPE_RULES) if (rule.re.test(asset)) out.push(...rule.cats)
+    return out
+  }
+
+  export function generateVrtChecklist(entryType: Type, asset?: string): Array<{ category: string; path: string }> {
+    const base = Phase.VRT_CATEGORIES_BY_TYPE[entryType] ?? []
+    // Merge base + shape-derived, dedupe by category (first path wins) to avoid check explosion.
+    const merged: Array<{ category: string; path: string }> = []
+    const seen = new Set<string>()
+    for (const c of [...base, ...shapeCategories(asset)]) {
+      if (seen.has(c.category)) continue
+      seen.add(c.category)
+      merged.push(c)
+    }
+    if (asset && STATIC_ASSET_RE.test(asset)) return merged.filter((c) => !INJECTION_CATEGORIES.has(c.category))
+    return merged
   }
 
   export function getVrtChecks(
@@ -272,6 +347,8 @@ export namespace Intel {
     path?: string
     status: string
     technique?: string
+    techniquesAttempted: string[]
+    justification?: string
     testedBy?: string
     evidence?: Record<string, unknown>
   }> {
@@ -291,9 +368,17 @@ export namespace Intel {
       path: r.vrt_path ?? undefined,
       status: r.status,
       technique: r.technique ?? undefined,
+      techniquesAttempted: (r.techniques_attempted as string[] | null) ?? [],
+      justification: r.single_technique_justification ?? undefined,
       testedBy: r.tested_by ?? undefined,
       evidence: (r.evidence as Record<string, unknown>) ?? undefined,
     }))
+  }
+
+  /** Single-row lookup used by Gate 1 (vrt-check.ts) to read the accumulated
+   *  technique list before deciding whether a close is allowed. */
+  export function getVrtCheck(sessionID: string, entryID: string, category: string) {
+    return getVrtChecks(sessionID, entryID).find((c) => c.category === category)
   }
 
   export function updateVrtCheck(
@@ -301,8 +386,10 @@ export namespace Intel {
     entryID: string,
     category: string,
     update: {
-      status: "tested_vulnerable" | "tested_not_vulnerable" | "not_applicable"
+      status: "pending" | "tested_vulnerable" | "tested_not_vulnerable" | "not_applicable"
       technique?: string
+      techniquesAttempted?: string[]
+      justification?: string
       testedBy?: string
       evidence?: Record<string, unknown>
     },
@@ -326,6 +413,8 @@ export namespace Intel {
           .set({
             status: update.status,
             technique: update.technique ?? existing.technique,
+            techniques_attempted: update.techniquesAttempted ?? (existing.techniques_attempted as string[] | null),
+            single_technique_justification: update.justification ?? existing.single_technique_justification,
             tested_by: update.testedBy ?? existing.tested_by,
             tested_at: now,
             evidence: (update.evidence as any) ?? existing.evidence,
@@ -342,6 +431,8 @@ export namespace Intel {
             vrt_category: category,
             status: update.status,
             technique: update.technique ?? null,
+            techniques_attempted: update.techniquesAttempted ?? null,
+            single_technique_justification: update.justification ?? null,
             tested_by: update.testedBy ?? null,
             tested_at: now,
             evidence: (update.evidence as any) ?? null,
@@ -380,6 +471,11 @@ export namespace Intel {
     entryTitle: string
     vrtCategory: string
     asset: string
+    // Distinct techniques already logged for this check (Gate 1, plan_A1.md
+    // §4.3). 0 = never touched; >=1 = Gate 1 is holding it open pending a
+    // second distinct technique (or a justification) — cheaper to finish
+    // than to start a fresh untested item, so directives should prioritize it.
+    techniquesAttempted: number
   }
 
   export function computeCoverage(sessionID: string): CoverageReport {
@@ -405,15 +501,20 @@ export namespace Intel {
     const weightedCoveragePercent = totalWeight > 0 ? Math.round((weightedComplete / totalWeight) * 100) : 0
 
     const redFlags = detectRedFlags(entries, allChecks)
-    const untestedItems = pending.map((c) => {
-      const entry = entryMap.get(c.entryID)
-      return {
-        entryID: c.entryID,
-        entryTitle: entry?.title ?? "unknown",
-        vrtCategory: c.category,
-        asset: entry?.asset ?? "unknown",
-      }
-    })
+    const untestedItems = pending
+      .map((c) => {
+        const entry = entryMap.get(c.entryID)
+        return {
+          entryID: c.entryID,
+          entryTitle: entry?.title ?? "unknown",
+          vrtCategory: c.category,
+          asset: entry?.asset ?? "unknown",
+          techniquesAttempted: c.techniquesAttempted.length,
+        }
+      })
+      // Items Gate 1 is holding open (1 technique already logged) surface
+      // first — one more technique closes them, cheaper than starting fresh.
+      .sort((a, b) => b.techniquesAttempted - a.techniquesAttempted)
 
     return {
       totalEntries: entries.length,
@@ -585,7 +686,8 @@ export namespace Intel {
       lines.push("")
       lines.push("### Untested (top 10):")
       for (const item of coverage.untestedItems.slice(0, 10)) {
-        lines.push(`- ${item.entryID}: ${item.entryTitle} -> ${item.vrtCategory} (${item.asset})`)
+        const note = item.techniquesAttempted >= 1 ? ` [1 technique tried — needs 1 more to close]` : ""
+        lines.push(`- ${item.entryID}: ${item.entryTitle} -> ${item.vrtCategory} (${item.asset})${note}`)
       }
     }
 

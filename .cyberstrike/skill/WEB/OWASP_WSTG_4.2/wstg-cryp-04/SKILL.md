@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [cryptography, tls, ssl, encryption, wstg, cryp]
 tech_stack: []
 cwe_ids: [CWE-327]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-cryp-01, wstg-cryp-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-cryp-02: "Weak/predictable encryption (ECB mode, hardcoded keys, non-random IVs) combined with a padding oracle in the same cryptographic implementation makes ciphertext decryption both theoretically weak AND practically automatable via oracle queries — a ready-made path to full plaintext recovery (Critical)"
 ---
 
 # wstg-cryp-04
@@ -195,6 +196,42 @@ def check_password_hash_strength(api_endpoint, test_password):
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Identify hash type from a captured value (32/40/64/128 hex chars)
+echo -n "5f4dcc3b5aa765d61d8327deb882cf99" | hashid -m
+hash-identifier 5f4dcc3b5aa765d61d8327deb882cf99
+
+# Confirm MD5/SHA1 by cracking a suspected weak hash (authorized creds/test data only)
+hashcat -m 0  -a 0 md5_hashes.txt /usr/share/wordlists/rockyou.txt   # MD5
+hashcat -m 100 -a 0 sha1_hashes.txt /usr/share/wordlists/rockyou.txt # SHA1
+john --format=raw-md5 md5_hashes.txt
+
+# Detect ECB mode: repeated 16-byte ciphertext blocks in Base64 output
+python3 -c "
+import base64
+data = base64.b64decode('BASE64_CIPHERTEXT_HERE')
+blocks = [data[i:i+16] for i in range(0, len(data), 16)]
+print('[VULN] ECB mode (repeated blocks)' if len(blocks) != len(set(blocks)) else 'No repeated blocks')
+"
+
+# Grep source/config dumps for hardcoded keys/secrets
+grep -RnoE '(key|secret|password)\s*[:=]\s*["\x27][^"\x27]{16,}["\x27]' ./app_source/
+grep -Rno 'AES\.new(' ./app_source/
+
+# Inspect a ciphertext quickly in CyberChef (browser) using recipe: "From Base64" -> "Detect File Type" / "Entropy"
+```
+
+**Result patterns indicating a finding:**
+- `hashid`/`hash-identifier` flags a 32-hex-char value as `MD5` or 40-hex-char as `SHA1` used for password storage → weak hash algorithm
+- `hashcat`/`john` successfully cracks a stored hash against a common wordlist with no salt → weak/unsalted hashing
+- Python block-repeat check reports repeated 16-byte blocks → ECB mode encryption
+- grep on source/config matches `key=`, `secret=`, `AES.new("...")` with a literal string → hardcoded encryption key
+- CyberChef "Entropy" on a ciphertext blob is low (well below ~7.9/8) → possibly not real encryption (encoding only, or broken cipher)
+
+---
+
 ## Remediation Guide
 
 ### Use Strong Encryption
@@ -246,6 +283,15 @@ if bcrypt.checkpw(password.encode(), stored_hash):
 | **CWE-328** | Reversible One-Way Hash                        |
 | **CWE-329** | Not Using a Random IV with CBC Mode            |
 
+
+---
+
+## References
+
+- [OWASP WSTG-CRYP-04: Testing for Weak Encryption](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/09-Testing_for_Weak_Cryptography/04-Testing_for_Weak_Encryption)
+- [OWASP Cryptographic Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html)
+- [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
+- [NIST SP 800-131A: Transitioning Cryptographic Algorithms and Key Lengths](https://csrc.nist.gov/publications/detail/sp/800-131a/rev-2/final)
 
 ---
 

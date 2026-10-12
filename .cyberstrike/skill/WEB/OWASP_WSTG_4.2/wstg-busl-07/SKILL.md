@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [business-logic, workflow, abuse, wstg, busl]
 tech_stack: []
 cwe_ids: [CWE-840]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-busl-01, wstg-busl-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-busl-01: "Absent rate limiting/lockout means the boundary-value probing needed to discover business-logic flaws (negative quantity, price=0, discount=150%) can be automated and completed in seconds instead of being throttled — converts a manual finding into a scriptable mass-exploit tool (High)"
+  wstg-busl-02: "No CAPTCHA/lockout combined with predictable or replayable request tokens allows unlimited automated replay of sensitive transactions without friction — the two weaknesses compound into fully automatable fraud at unlimited scale (Critical)"
 ---
 
 # wstg-busl-07
@@ -288,6 +290,29 @@ done
 ---
 
 ## Example Commands/Payloads
+
+### Regular Expression Denial of Service (ReDoS) (from PayloadsAllTheThings)
+
+Beyond rate limiting and lockouts, test whether any user-controlled input (search fields, validation regexes for email/username, format checks) is validated with an "evil regex" that catastrophically backtracks — this lets a single crafted request exhaust CPU and misuse the application without needing volume:
+
+```bash
+# Evil regex patterns to look for in client-side or leaked server-side validation code:
+#   (a+)+          ([a-zA-Z]+)*          (a|aa)+          (a|a?)+          (.*a){10,}
+# These share: a repeated group containing internal repetition or overlapping alternation.
+
+# Test payload for a field validated by an evil regex: N repeats followed by a char that fails the match,
+# forcing the engine to try every grouping before giving up
+curl -s -X POST "https://{target}/api/validate" \
+    -H "Content-Type: application/json" \
+    -d '{"field": "'"$(python3 -c 'print("a"*35)')"'!"}'
+
+# Time the response - exponential blowup shows as a request that hangs well past baseline latency
+time curl -s -X POST "https://{target}/api/validate" \
+    -H "Content-Type: application/json" \
+    -d '{"field": "'"$(python3 -c 'print("a"*40)')"'!"}'
+```
+
+Also test whether a `false`-on-failure return from a bounded regex engine (e.g. PHP `preg_match` hitting `pcre.backtrack_limit`) is misinterpreted by the app as "input did not match the blocklist" rather than "validation failed" — sending enough backtracking load (e.g. hundreds of thousands of empty comment sequences prefixing a blocked keyword) can make a security filter silently fail open. Static analysis tools such as `doyensec/regexploit` or `tjenkinson/redos-detector` can flag evil regexes directly if source/config is available.
 
 ### Abuse Defense Tester
 
@@ -662,6 +687,7 @@ class BehaviorAnalyzer:
 - [OWASP WSTG - Test Defenses Against Application Misuse](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/10-Business_Logic_Testing/07-Test_Defenses_Against_Application_Misuse)
 - [OWASP Blocking Brute Force](https://owasp.org/www-community/controls/Blocking_Brute_Force_Attacks)
 - [OWASP Credential Stuffing Prevention](https://cheatsheetseries.owasp.org/cheatsheets/Credential_Stuffing_Prevention_Cheat_Sheet.html)
+- [PayloadsAllTheThings - Regular Expression (ReDoS)](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Regular%20Expression)
 
 
 ---

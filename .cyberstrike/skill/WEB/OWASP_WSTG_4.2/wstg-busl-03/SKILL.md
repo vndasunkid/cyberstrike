@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [business-logic, workflow, abuse, wstg, busl]
 tech_stack: []
 cwe_ids: [CWE-840]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-busl-01, wstg-busl-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-busl-01: "Missing integrity verification (no HMAC/signature) combined with accepted business-rule violations (arbitrary price/quantity/discount) lets tampered financial data pass through the entire transaction pipeline completely undetected (Critical)"
+  wstg-busl-02: "Missing integrity checks combined with forgeable/replayable tokens remove both defenses that would normally stop transaction tampering — an attacker can both modify AND fully fabricate transactions the server treats as authentic (Critical)"
 ---
 
 # wstg-busl-03

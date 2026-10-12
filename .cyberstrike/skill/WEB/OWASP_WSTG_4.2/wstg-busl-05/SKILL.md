@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [business-logic, workflow, abuse, wstg, busl]
 tech_stack: []
 cwe_ids: [CWE-840]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-busl-01, wstg-busl-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-busl-01: "Usage/rate-limit bypass combined with accepted business-logic violations (negative discount, price=0) means an exploitable financial bug is not a one-time loss but repeatable without limit — turns a bounded flaw into unbounded financial drain (Critical)"
 ---
 
 # wstg-busl-05

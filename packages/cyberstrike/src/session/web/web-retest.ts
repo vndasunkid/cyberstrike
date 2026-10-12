@@ -1,8 +1,8 @@
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
 import z from "zod"
-import { Database, eq, and, asc } from "../../storage/db"
-import { WebRetestQueueTable, RequestTable } from "../session.sql"
+import { Database, eq, and, asc, inArray } from "../../storage/db"
+import { WebRetestQueueTable, RequestTable, WebObjectTable, WebFunctionTable } from "../session.sql"
 import { Identifier } from "../../id/id"
 
 const TriggerType = z.enum(["new_role", "new_object_value", "new_credential"])
@@ -234,6 +234,37 @@ export namespace WebRetest {
   }
 
   /**
+   * Requests actually touching the given objects: either the request that created/updated
+   * the object (WebObjectTable provenance) or a request whose recorded function operates on
+   * it (WebFunctionTable.objects). Used to scope re-tests to relevant endpoints instead of
+   * the whole session.
+   */
+  function relevantRequestIDs(sessionID: string, objectIDs: string[]): Set<string> {
+    const ids = new Set<string>()
+
+    const objects = Database.use((db) =>
+      db
+        .select()
+        .from(WebObjectTable)
+        .where(and(eq(WebObjectTable.session_id, sessionID), inArray(WebObjectTable.id, objectIDs)))
+        .all(),
+    )
+    for (const object of objects) {
+      if (object.created_request_id) ids.add(object.created_request_id)
+      for (const reqId of object.updated_request_ids ?? []) ids.add(reqId)
+    }
+
+    const functions = Database.use((db) =>
+      db.select().from(WebFunctionTable).where(eq(WebFunctionTable.session_id, sessionID)).all(),
+    )
+    for (const func of functions) {
+      if (func.objects?.some((objectID) => objectIDs.includes(objectID))) ids.add(func.request_id)
+    }
+
+    return ids
+  }
+
+  /**
    * Check if new discoveries should trigger re-tests
    * Returns list of queued re-tests
    */
@@ -248,9 +279,17 @@ export namespace WebRetest {
     const results: Info[] = []
 
     // Get all requests in the session
-    const requests = Database.use((db) =>
+    let requests = Database.use((db) =>
       db.select().from(RequestTable).where(eq(RequestTable.session_id, input.sessionID)).all(),
     )
+
+    // Scope to endpoints actually touching the related objects, when known — an object-value
+    // discovery (e.g. a new IDOR-able ID) should only re-test the handful of endpoints that use
+    // that object, not every endpoint in the session.
+    if (input.relatedObjectIDs?.length) {
+      const relevant = relevantRequestIDs(input.sessionID, input.relatedObjectIDs)
+      if (relevant.size > 0) requests = requests.filter((r) => relevant.has(r.id))
+    }
 
     // Determine priority based on trigger type and relevance
     let priority: z.infer<typeof Priority> = "medium"

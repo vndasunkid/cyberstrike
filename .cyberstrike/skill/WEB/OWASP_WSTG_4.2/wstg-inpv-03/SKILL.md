@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: [CWE-89]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-05, wstg-inpv-01]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-05: "HTTP Verb Tampering bypasses method-restricted access control (WAF/ACL rules that only inspect POST) to reach an unauthenticated SQL Injection endpoint via GET/PUT = Critical (Full DB Compromise)"
 ---
 
 # wstg-inpv-03
@@ -322,6 +323,59 @@ FAKE
 | Burp Suite        | Intercept and modify methods  |
 | Nmap http-methods | Script for method enumeration |
 | OWASP ZAP         | Web scanner                   |
+
+---
+
+## Example Commands/Payloads
+
+### Method Enumeration (curl / nmap)
+
+```bash
+TARGET="https://target.com/admin"
+
+# Enumerate allowed methods via OPTIONS
+curl -s -i -X OPTIONS "$TARGET" | grep -i "^allow:"
+
+# Sweep individual verbs and compare status codes/lengths
+for m in GET POST PUT DELETE PATCH HEAD TRACE CONNECT PROPFIND COPY MOVE LOCK UNLOCK MKCOL FAKEVERB; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" -X "$m" "$TARGET")
+    echo "$m -> $code"
+done
+
+# Nmap http-methods NSE script
+nmap -p 443 --script http-methods --script-args http-methods.url-path='/admin' target.com
+```
+
+### Authentication/Authorization Bypass via Verb Tampering
+
+```bash
+# Baseline: GET is blocked (401/403)
+curl -s -o /dev/null -w "GET -> %{http_code}\n" "$TARGET"
+
+# Try alternate verbs against the same protected resource
+curl -s -o /dev/null -w "POST -> %{http_code}\n" -X POST "$TARGET"
+curl -s -o /dev/null -w "HEAD -> %{http_code}\n" -X HEAD "$TARGET"
+curl -s -o /dev/null -w "TRACE -> %{http_code}\n" -X TRACE "$TARGET"
+curl -s -o /dev/null -w "FAKEVERB -> %{http_code}\n" -X FAKEVERB "$TARGET"
+
+# 200 on a verb that GET/POST denies indicates a verb-based ACL bypass (e.g. Apache <LimitExcept GET POST>)
+```
+
+### Cross-Site Tracing (XST) Check
+
+```bash
+curl -s -i -X TRACE "$TARGET" -H "X-Header: xst-test" | grep -q "xst-test" && \
+    echo "[VULN] TRACE enabled and reflects headers - XST possible (can bypass HttpOnly cookies via XSS)"
+```
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| `Allow:` header lists verbs beyond `GET, POST, HEAD, OPTIONS` | Extra methods enabled, needs review |
+| A restricted resource returns `200`/`3xx` for a non-standard verb while `GET` returns `401`/`403` | ACL implemented only for specific verbs — bypass |
+| `TRACE` response echoes back request headers | XST vulnerable, can be combined with XSS to steal `HttpOnly` cookies |
+| WebDAV verbs (`PROPFIND`, `MKCOL`, `PUT`) return `2xx`/`207` | WebDAV enabled and potentially writable |
 
 ---
 

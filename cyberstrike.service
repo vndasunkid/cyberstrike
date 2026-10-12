@@ -1,0 +1,16 @@
+[Unit]
+Description=CyberStrike
+After=network.target
+
+[Service]
+Type=simple
+Environment=DISPLAY=:10
+Environment=XAUTHORITY=/home/master/.Xauthority
+Environment=CYBERSTRIKE_SERVER_PASSWORD=admin
+KillMode=mixed
+ExecStart=/home/master/code/CyberStrike/packages/cyberstrike/dist/cyberstrike-linux-x64/bin/cyberstrike web --hostname 0.0.0.0 --port 8676
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

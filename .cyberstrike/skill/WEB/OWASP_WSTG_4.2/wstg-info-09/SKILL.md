@@ -8,7 +8,7 @@ author: cyberstrike-official
 tags: [recon, fingerprint, enumeration, wstg, info]
 tech_stack: []
 cwe_ids: [CWE-200]
-chains_with: []
+chains_with: [wstg-info-01, wstg-info-02]
 prerequisites: []
 severity_boost: {}
 ---
@@ -82,6 +82,67 @@ When fingerprinting custom applications, document:
 5. **Technology Stack**: Underlying frameworks and libraries
 6. **Known CVEs**: Research based on identified versions
 
+
+---
+
+## Tools
+
+| Tool             | Description                                   | Usage                                             |
+| ---------------- | ---------------------------------------------- | -------------------------------------------------- |
+| **Wappalyzer**   | Technology/CMS/JS-library fingerprinting (CLI/browser ext) | `wappalyzer https://target.com`        |
+| **whatweb**      | Web technology fingerprinter                  | `whatweb -a 3 target.com`                          |
+| **curl**         | Manual header/banner grabbing                 | `curl -sI https://target.com`                      |
+| **BuiltWith**    | Online technology profiler                    | Web-based                                          |
+| **Nikto**        | Server banner + fingerprint checks            | `nikto -h https://target.com`                      |
+| **httpx**        | Fast HTTP probing with tech detection         | `httpx -u target.com -title -server -tech-detect`  |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+TARGET="target.com"
+
+# Wappalyzer CLI - technology stack, CMS, JS libraries, analytics
+wappalyzer "https://$TARGET" --pretty
+
+# whatweb - aggressive fingerprinting (level 3) with version detection
+whatweb -a 3 -v "$TARGET"
+
+# httpx - quick tech-detect + title + server banner across a list of hosts
+echo "$TARGET" | httpx -title -server -tech-detect -status-code
+
+# curl - manual banner grabbing from response headers
+curl -sI "https://$TARGET" | grep -iE 'server|x-powered-by|x-aspnet-version|x-generator'
+
+# Grab custom/app-specific version strings from common endpoints
+for path in /version /api/version /health /info /about /humans.txt; do
+  echo "=== $path ==="
+  curl -s "https://$TARGET$path"
+done
+
+# Search rendered HTML/JS for build/version comments and custom cookies
+curl -s "https://$TARGET" | grep -iE '<!--.*(version|build|release).*-->'
+curl -sI "https://$TARGET" | grep -i 'set-cookie'
+curl -s "https://$TARGET/app.js" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+'
+```
+
+**Result patterns indicating a finding:**
+- Wappalyzer/whatweb/httpx return a named CMS, framework, or library with a specific version number → confirms application fingerprint, cross-reference against known CVEs
+- `Server:`/`X-Powered-By:`/`X-Generator:` headers leak stack + version → direct fingerprint without active scanning
+- `/version`, `/api/version`, `/health`, `/info` endpoints return JSON/plaintext with a build number or commit hash → precise version disclosure
+- HTML comments or `app.js` contain `vX.Y.Z` strings or internal build identifiers → source-level version leakage
+- Application-specific `Set-Cookie` names (e.g. `JSESSIONID`, `PHPSESSID`, custom `APPNAME_session`) → framework/app identification via cookie naming convention
+
+---
+
+## References
+
+- [OWASP WSTG-INFO-08: Fingerprint Web Application Framework](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/01-Information_Gathering/08-Fingerprint_Web_Application_Framework)
+- [Wappalyzer](https://www.wappalyzer.com/)
+- [whatweb (GitHub)](https://github.com/urbanadventurer/WhatWeb)
+- [httpx (ProjectDiscovery)](https://github.com/projectdiscovery/httpx)
+- [BuiltWith](https://builtwith.com/)
 
 ---
 

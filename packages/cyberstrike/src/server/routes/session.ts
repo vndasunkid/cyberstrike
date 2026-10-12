@@ -16,10 +16,12 @@ import { Vulnerability } from "../../session/vulnerability"
 import { Request } from "../../session/request"
 import { Observation } from "../../session/observation"
 import { CoverageNote } from "../../session/coverage-note"
+import { Intel } from "../../methodology/intel"
 import { Normalize } from "../../session/normalize"
 import { IngestSummary } from "../../session/ingest-summary"
 import { IngestQueue } from "../../session/ingest-queue"
 import { WebCredential } from "../../session/web/web-credential"
+import { WebAuthBootstrap } from "../../session/web/web-auth-bootstrap"
 import { WebRole } from "../../session/web/web-role"
 import { WebObject } from "../../session/web/web-object"
 import { WebFunction } from "../../session/web/web-function"
@@ -322,6 +324,102 @@ async function runNormalize(
     // through to the non-HTTP ingest branch.
     log.debug("normalize parse failed", { error: (err as Error).message })
     return null
+  }
+}
+
+function buildRetestPrompt(sessionID: string, req: Request.Info, retest: WebRetest.Info): string {
+  const label = retest.trigger_type.replace(/_/g, " ")
+  const header = [
+    `## Re-test Trigger`,
+    `Re-testing because a new **${label}** was discovered (source: ${retest.trigger_source}, priority: ${retest.priority}).`,
+    `Skip proxy-analyzer — architecture is already known. Focus on access control: dispatch proxy-tester-authz at minimum.`,
+    ``,
+  ].join("\n")
+
+  const coverage = CoverageNote.wideBlock(sessionID, req.origin ?? "")
+  const base = buildPromptWithCredentialContext(
+    req.raw_request!,
+    req.credential_id,
+    req.processed_response,
+    req.trigger_element || req.page_url || req.ui_context
+      ? {
+          triggerElement: req.trigger_element,
+          elementRoles: req.element_roles,
+          pageUrl: req.page_url,
+          pageVisitedBy: req.page_visited_by,
+          uiContext: req.ui_context as Record<string, unknown> | undefined,
+        }
+      : undefined,
+    req.protocol && req.operation ? { protocol: req.protocol, operation: req.operation } : undefined,
+    req.key_hash ? Observation.endpointTree(sessionID, req.key_hash) : undefined,
+  )
+
+  return `${header}${coverage ? `${coverage}\n\n${base}` : base}`
+}
+
+// Bước 5.1 (plan_fix.md): recursion cap. Each retest completion re-drains the queue (line ~402);
+// combined with checkTriggers fan-out this produced a 380-item / ~30h cascade (HANDOFF-2026-08-11
+// Issue 1). Cap the recursion depth so a chain of retests-triggering-retests cannot run unbounded.
+const MAX_RETEST_DEPTH = 3
+
+function enqueueRetests(
+  sessionID: string,
+  agentName: string,
+  model: { providerID: string; modelID: string } | undefined,
+  depth = 0,
+) {
+  if (depth >= MAX_RETEST_DEPTH) {
+    log.warn("retest recursion cap reached — not re-draining queue", { sessionID, depth })
+    return
+  }
+  const pending = WebRetest.getPending(sessionID)
+  if (pending.length === 0) return
+
+  const requestMap = new Map(Request.get(sessionID).map((r) => [r.id, r]))
+
+  for (const retest of pending) {
+    // Mark processing before enqueueing to prevent double-scheduling on concurrent ingest completions
+    WebRetest.updateStatus(retest.id, "processing")
+    const req = requestMap.get(retest.request_id)
+    if (!req?.raw_request) {
+      WebRetest.updateStatus(retest.id, "completed")
+      continue
+    }
+
+    const promptText = buildRetestPrompt(sessionID, req, retest)
+    const source = `retest(${retest.trigger_type}): ${req.method} ${req.normalized_path}`
+    const retestId = retest.id
+
+    IngestQueue.enqueue(
+      sessionID,
+      async () => {
+        const before = IngestSummary.snapshot(sessionID)
+        try {
+          await SessionPrompt.prompt({
+            sessionID,
+            agent: agentName,
+            model,
+            excludeHistory: true,
+            parts: [{ type: "text", text: promptText }],
+          })
+          const resolvedModel = model ?? (await SessionPrompt.lastModel(sessionID))
+          await IngestSummary.write({
+            sessionID,
+            agent: agentName,
+            model: resolvedModel,
+            source,
+            before,
+            after: IngestSummary.snapshot(sessionID),
+          })
+          // Dispatch any new re-tests triggered by discoveries made during this re-test
+          enqueueRetests(sessionID, agentName, model, depth + 1)
+        } finally {
+          WebRetest.updateStatus(retestId, "completed")
+        }
+        // Re-tests are the DEEP-coverage pass — run only after all fresh breadth work is drained.
+      },
+      IngestQueue.Priority.DEEP,
+    )
   }
 }
 
@@ -1156,6 +1254,17 @@ export const SessionRoutes = lazy(() =>
         const ingestDryRun = process.env.CYBERSTRIKE_INGEST_DRY_RUN === "true"
         const normalized = await runNormalize(body, sessionID, ingestDryRun)
 
+        // Deterministic authenticated-session bootstrap: as soon as we know the target origin,
+        // establish lab credentials from config (not the prompt), so idor/authz never get
+        // skipped for "0 credentials". Runs once per (session, origin); best-effort.
+        if (normalized?.origin) {
+          try {
+            await WebAuthBootstrap.ensureBootstrap(sessionID, normalized.origin)
+          } catch (e) {
+            log.warn("auto-bootstrap failed", { sessionID, origin: normalized.origin, error: String(e) })
+          }
+        }
+
         if (normalized) {
           const isDuplicate = Request.exists({
             sessionID,
@@ -1237,6 +1346,68 @@ export const SessionRoutes = lazy(() =>
           // New endpoint shape: record the first observation, linked to the row.
           recordObservation(req.id)
 
+          // Perf (plan_fix.md): SPA catch-all short-circuit. If this GET returned an HTML body that
+          // has already appeared for ≥3 distinct paths, it is the app's catch-all shell (every
+          // unmatched route returns the same index.html — no per-path server logic). Testing each
+          // such path as a distinct endpoint is the single biggest source of wasted LLM
+          // orchestrations (baocao256.md: hundreds of "byte-inert" catch-all findings). Skip both
+          // the test orchestration AND the methodology bridge; record a coverage note so it is
+          // tracked, not lost. API/JSON responses have per-path bodies → this never fires on them.
+          {
+            const respHeaders = (body.response?.headers ?? {}) as Record<string, string>
+            const respCT = String(respHeaders["content-type"] ?? respHeaders["Content-Type"] ?? "")
+            const isHtmlGet =
+              normalized.method === "GET" && (body.response?.status ?? 0) < 400 && /text\/html/i.test(respCT)
+            // Key on the RESPONSE-body hash (the request body is empty for GET) — an SPA shell
+            // served identically across ≥3 paths is a catch-all with no per-path server logic.
+            const respHash = Request.hashResponse(body.response?.body)
+            if (isHtmlGet && respHash && Request.distinctPathsForResponseHash(sessionID, respHash) >= 3) {
+              try {
+                CoverageNote.record({
+                  sessionID,
+                  asset: normalized.origin || normalized.host || "unknown",
+                  class: "catch-all",
+                  scope: "wide",
+                  note: `GET ${normalized.normalizedPath} → SPA catch-all shell (body identical across ≥3 routes); no per-path server logic — test orchestration skipped.`,
+                  testedBy: "ingest",
+                  requestID: req.id,
+                })
+              } catch {
+                // coverage note is best-effort; never block ingest
+              }
+              Request.updateStatus({ id: req.id, status: "processed" })
+              c.status(202)
+              return c.json({ sessionID, skipped: true, catchAll: true })
+            }
+          }
+
+          // Methodology bridge (plan_A2.md §redesign): mirror every newly-captured
+          // endpoint into the Methodology Engine as an IntelEntry(type:"endpoint").
+          // Intel.add auto-generates the per-category VRT checklist and dedups by
+          // title+asset, so this is idempotent across re-ingests. This is the single
+          // point that makes the proxy pipeline visible to the engine at all — the
+          // proxy agents (orchestrator/analyzer) have no add_intel tool, so WITHOUT
+          // this bridge IntelEntryTable stays empty for the whole proxy flow and
+          // BOTH prior fixes are dormant there: the active_recon breadth floor (A2,
+          // via the "active-recon" tag counted in methodology.ts) and Gate 1's
+          // technique-depth requirement on update_vrt_check (A1) never see anything
+          // to enforce. Wrapped so a methodology failure can never break ingest.
+          try {
+            Intel.add({
+              sessionID,
+              data: {
+                type: "endpoint",
+                title: `${normalized.method} ${normalized.normalizedPath}`,
+                asset: normalized.origin || normalized.host || "unknown",
+                source: "proxy-ingest",
+                tags: ["active-recon"],
+                confidenceLevel: "high",
+              },
+            })
+          } catch (err) {
+            log.warn("methodology bridge failed (non-fatal)", { sessionID, error: String(err) })
+          }
+
           // Build the prompt as a thunk so the `## Observed Values` block reflects the
           // observation state at SEND time, not at enqueue time. Prompts queue (LLM calls
           // are slow) and other per-credential requests to the SAME endpoint accrue
@@ -1279,34 +1450,49 @@ export const SessionRoutes = lazy(() =>
           } else {
             const agentName = body.agent ?? "proxy-agent"
             const source = `${normalized.method} ${normalized.normalizedPath}`
-            IngestQueue.enqueue(sessionID, async () => {
-              Request.updateStatus({ id: req.id, status: "processing" })
-              const before = IngestSummary.snapshot(sessionID)
-              // Render at dequeue (send time) so `## Observed Values` includes observations
-              // that accrued while this prompt waited in the queue — other credentials and
-              // other values seen on the same endpoint shape in the meantime.
-              const promptText = buildPrompt()
-              try {
-                await SessionPrompt.prompt({
-                  sessionID,
-                  agent: agentName,
-                  model: body.model,
-                  excludeHistory: true,
-                  parts: [{ type: "text", text: promptText }],
-                })
-                const model = body.model ?? (await SessionPrompt.lastModel(sessionID))
-                await IngestSummary.write({
-                  sessionID,
-                  agent: agentName,
-                  model,
-                  source,
-                  before,
-                  after: IngestSummary.snapshot(sessionID),
-                })
-              } finally {
-                Request.updateStatus({ id: req.id, status: "processed" })
-              }
-            })
+            // "nhanh → ra rộng": high-signal endpoints (state-changing method, API path, has
+            // query params, or auth-bound) test FIRST; plain page GETs wait. So a short session
+            // still covers the important surface, and only then deepens.
+            const capturePriority =
+              normalized.method !== "GET" ||
+              /\/(api|rest)\b/i.test(normalized.normalizedPath) ||
+              Boolean(credentialID) ||
+              Boolean(normalized.queryKeyHash)
+                ? IngestQueue.Priority.HIGH
+                : IngestQueue.Priority.NORMAL
+            IngestQueue.enqueue(
+              sessionID,
+              async () => {
+                Request.updateStatus({ id: req.id, status: "processing" })
+                const before = IngestSummary.snapshot(sessionID)
+                // Render at dequeue (send time) so `## Observed Values` includes observations
+                // that accrued while this prompt waited in the queue — other credentials and
+                // other values seen on the same endpoint shape in the meantime.
+                const promptText = buildPrompt()
+                try {
+                  await SessionPrompt.prompt({
+                    sessionID,
+                    agent: agentName,
+                    model: body.model,
+                    excludeHistory: true,
+                    parts: [{ type: "text", text: promptText }],
+                  })
+                  const model = body.model ?? (await SessionPrompt.lastModel(sessionID))
+                  await IngestSummary.write({
+                    sessionID,
+                    agent: agentName,
+                    model,
+                    source,
+                    before,
+                    after: IngestSummary.snapshot(sessionID),
+                  })
+                  enqueueRetests(sessionID, agentName, body.model)
+                } finally {
+                  Request.updateStatus({ id: req.id, status: "processed" })
+                }
+              },
+              capturePriority,
+            )
           }
         } else {
           // Non-HTTP request (plain text message)

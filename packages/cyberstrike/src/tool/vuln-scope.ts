@@ -20,6 +20,11 @@ export const TESTER_VRT_SCOPE: Record<string, string[]> = {
     "bfla",
     "cors",
     "forbidden",
+    // Open Redirect (plan_A1.md §4.2b, Gate 1 v2 taxonomy) — closest existing
+    // lane: it's an access-control-adjacent client-side redirect trust issue,
+    // not an injection payload class.
+    "open redirect",
+    "redirect",
   ],
   injection: [
     "sqli",
@@ -58,7 +63,20 @@ export const TESTER_VRT_SCOPE: Record<string, string[]> = {
     "zip slip",
   ],
   "mass-assignment": ["mass assignment", "over-post", "overpost"],
-  "business-logic": ["race condition", "business logic", "chain", "captcha", "workflow", "negative"],
+  "business-logic": [
+    "race condition",
+    "business logic",
+    "chain",
+    "captcha",
+    "workflow",
+    "negative",
+    // Weak Crypto (plan_A1.md §4.2b, Gate 1 v2 taxonomy) — closest existing
+    // lane: forging a coupon/token via a decoded weak-crypto scheme is a
+    // business-logic exploit (bypass an intended constraint), not a payload
+    // injection class.
+    "weak crypto",
+    "coupon",
+  ],
 }
 
 /**
@@ -91,8 +109,8 @@ const TITLE_SIGNATURES: [string, RegExp][] = [
   ["file-attacks", /path traversal|directory traversal|\blfi\b|\brfi\b|arbitrary file (read|upload)|zip slip/i],
   ["mass-assignment", /mass assignment|over-?posting/i],
   ["authn", /default.*cred|brute[- ]?force|rate limit|password policy|account lockout|session fixation|weak password/i],
-  ["authz", /broken access control|privilege escalation|unauthenticated access to/i],
-  ["business-logic", /race condition|negative amount|workflow bypass/i],
+  ["authz", /broken access control|privilege escalation|unauthenticated access to|open redirect/i],
+  ["business-logic", /race condition|negative amount|workflow bypass|forged coupon|weak crypto|predictable token/i],
 ]
 export function classifyFindingTitle(title: string): string | null {
   const s = (title ?? "").toLowerCase()
@@ -199,15 +217,35 @@ export function categoryInLane(cls: string, category: string): boolean {
  */
 export function dispatchScopeViolation(
   subagentType: string | undefined,
-  objective: string,
+  focus: string,
+  fullText?: string,
 ): { cls: string; inferred: string } | null {
   const m = subagentType?.match(/^proxy-tester-(.+)$/)
   if (!m) return null
   const cls = m[1]
-  if (!TESTER_VRT_SCOPE[cls]) return null
-  const inferred = classifyFindingTitle(objective)
-  if (inferred && inferred !== cls) return { cls, inferred }
-  return null
+  const allowed = TESTER_VRT_SCOPE[cls]
+  if (!allowed) return null
+
+  // Classify intent on the SHORT dispatch label (`focus` = the task description),
+  // NEVER the full prompt. A real dispatch prompt legitimately references other
+  // classes — context, "don't re-test the login SQLi", "does this JWT claim render
+  // as XSS?" — and running the coarse title-classifier over that whole blob
+  // systematically mis-bounces in-lane dispatches (measured: authn and idor briefs
+  // rejected as "injection's lane" purely because the brief mentioned SQLi/XSS).
+  const signal = (focus ?? "").trim()
+  if (!signal) return null
+  const inferred = classifyFindingTitle(signal)
+  if (!inferred || inferred === cls) return null
+
+  // Safety net: even with a confident other-class label, do NOT bounce when the
+  // dispatch also clearly belongs to the target lane (its own scope keywords appear
+  // in the label or full brief). It is legitimately in-lane and merely names another
+  // class alongside. Genuine misroutes (e.g. a rate-limit task sent to business-logic)
+  // match no target-lane keyword and still bounce correctly.
+  const hay = `${signal}\n${fullText ?? ""}`.toLowerCase()
+  if (allowed.some((a) => hay.includes(a))) return null
+
+  return { cls, inferred }
 }
 
 /** Hand-off message shown when a tester is dispatched outside its lane. */

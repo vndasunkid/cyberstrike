@@ -267,18 +267,29 @@ admin'--
 ?price[$gt]=0
 ```
 
-**Testing approach:**
-1. Test operator injection ($gt, $ne, $regex)
-2. Array injection with brackets
-3. Check for MongoDB error messages
-4. Test authentication bypass
+**Testing approach** (full technique matrix is in the loaded WSTG-INPV-05.6 skill —
+follow it; the notes below are the high-miss reminders):**
+1. Test operator injection ($gt, $ne, $regex) in query AND JSON body
+2. **Inject operators in PATH / route params too (`/resource/:id`), not only query+body — most-missed vector**
+3. Array injection with brackets; check for MongoDB error messages
+4. Test authentication bypass (swap credential string fields for operator objects)
 
 **Report if:**
 - Authentication bypass successful
-- All documents returned unexpectedly
+- All documents returned unexpectedly / other users' records exfiltrated
 - MongoDB-specific errors revealed
 
 #### XSS Testing
+
+**Reflect ALSO via request HEADERS — not only query/form params.** Server-side
+reflected XSS (the "HTTP-Header XSS" class) fires when the app echoes a request
+header into an HTML/error/log-view response. For EVERY endpoint that reflects
+input, resend with a unique XSS marker in each of these headers and grep the
+response for it UN-encoded:
+- `User-Agent`, `Referer`, `Origin`, `X-Forwarded-Host`, `X-Forwarded-For`, `True-Client-IP`
+Example: `curl -H 'True-Client-IP: <iframe src="javascript:alert(`XSS`)">' <url>` then
+check the body. A marker reflected un-escaped from a header = header-based XSS —
+report it. Do NOT conclude "no XSS" after testing only query/body parameters.
 
 **Use `inject_probe` FIRST for reflected XSS on a query/form parameter.** Call
 `inject_probe(vuln_type: "xss", request_id)` — or, for an endpoint with no stored

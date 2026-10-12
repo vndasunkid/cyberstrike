@@ -50,6 +50,7 @@ import { Truncate } from "@/tool/truncation"
 import { Token } from "@/util/token"
 import { MethodologyContext } from "@/methodology/context"
 import { AgentPerformance } from "@/methodology/performance"
+import { Intel } from "@/methodology/intel"
 import { testerClass } from "@/tool/vuln-scope"
 import { stopHackbrowser } from "@/tool/hackbrowser-launcher"
 import { toolSig, READ_ONLY_TOOLS } from "./stuck/signals"
@@ -330,6 +331,34 @@ export namespace SessionPrompt {
     // forces wrap-up (nudge) then aborts (backstop). Different args never collide
     // because toolSig includes the args, so legitimate probing is unaffected.
     const repeatDetector = new RepeatDetector(3)
+    // Bước 5.2 (plan_fix.md): compaction progress guard. A model whose prompt cannot be shrunk
+    // (e.g. limit.context=0, or an irreducible oversized message) makes the compact→continue path
+    // spin forever on the same ContextOverflowError (issue.md: 4894 identical 400s / 21 min).
+    // Bail the turn after this many consecutive compactions that fail to let the loop advance.
+    const MAX_CONSECUTIVE_COMPACTIONS = 3
+    let consecutiveCompactions = 0
+    // Surface-coverage HARD-STOP (find-max enforcement). A top-level assessment agent
+    // (prompt-driven, not the ingest pipeline) tends to self-declare "done" after a
+    // small self-selected set, leaving most of the discovered surface untested — a
+    // response with no tool call terminates the run (the break below). Here we REFUSE
+    // that exit while the discovered surface is under-covered: inject a continuation and
+    // keep going. Progress-gated so it can never loop forever — it yields once coverage
+    // clears the floor, once forced turns stop improving coverage, or at an absolute cap.
+    const SURFACE_COVERAGE_FLOOR = 60 // % of a per-asset VRT checklist that must be completed
+    const MAX_FORCED_CONTINUATIONS = 400 // absolute backstop on injected continuations
+    const MAX_FORCE_NOPROGRESS = 8 // yield if coverage stalls across this many forced turns
+    // Only prompt-driven assessment drivers — NOT the ingest-driven proxy-agent (its
+    // own queue drives it) and NOT per-endpoint testers/analyzers (scoped to one request).
+    const SURFACE_DRIVER_AGENTS = new Set([
+      "web-application",
+      "cyberstrike",
+      "cloud-security",
+      "internal-network",
+      "mobile-application",
+    ])
+    let forcedContinuations = 0
+    let forceNoProgress = 0
+    let lastForcedCoverage = -1
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
       log.info("loop", { step, sessionID })
@@ -361,9 +390,78 @@ export namespace SessionPrompt {
       ) {
         if (lastAssistant.finish === "content-filter") {
           log.warn("exiting loop — content-filter", { sessionID, finish: lastAssistant.finish })
-        } else {
-          log.info("exiting loop", { sessionID })
+          break
         }
+
+        // Surface-coverage HARD-STOP: for a prompt-driven assessment driver, refuse to
+        // end while the discovered surface is under-covered. Inject a continuation and
+        // keep going instead of breaking. Progress- and cap-gated (see above) so this
+        // can never spin forever.
+        if (
+          !abort.aborted &&
+          SURFACE_DRIVER_AGENTS.has(lastUser.agent ?? "") &&
+          forcedContinuations < MAX_FORCED_CONTINUATIONS
+        ) {
+          let worst = 101
+          let pendingTotal = 0
+          try {
+            for (const a of Intel.computePerAssetCoverage(sessionID)) {
+              if (a.totalChecks <= 0) continue
+              if (a.coveragePercent < worst) worst = a.coveragePercent
+              pendingTotal += a.pendingChecks
+            }
+          } catch {
+            worst = 101
+          }
+          if (worst < SURFACE_COVERAGE_FLOOR && pendingTotal > 0) {
+            // progress guard: only keep forcing while coverage is still improving
+            if (worst <= lastForcedCoverage) forceNoProgress++
+            else forceNoProgress = 0
+            lastForcedCoverage = worst
+            if (forceNoProgress < MAX_FORCE_NOPROGRESS) {
+              forcedContinuations++
+              log.warn("surface-coverage hard-stop — forcing continuation", {
+                sessionID,
+                agent: lastUser.agent,
+                coveragePercent: worst,
+                pendingChecks: pendingTotal,
+                forcedContinuations,
+              })
+              const contMsg: MessageV2.User = {
+                id: Identifier.ascending("message"),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: lastUser.agent,
+                model: lastUser.model,
+              }
+              await Session.updateMessage(contMsg)
+              await Session.updatePart({
+                id: Identifier.ascending("part"),
+                messageID: contMsg.id,
+                sessionID,
+                type: "text",
+                synthetic: true,
+                text: [
+                  "<system-reminder>",
+                  `ASSESSMENT NOT COMPLETE — do NOT stop. The discovered attack surface is only ${worst}% covered and ${pendingTotal} registered endpoint checks are still untested.`,
+                  "Use the `task` tool to dispatch proxy-tester specialists (proxy-tester-injection, proxy-tester-idor, proxy-tester-authz, proxy-tester-authn, proxy-tester-business-logic, proxy-tester-mass-assignment, proxy-tester-ssrf, proxy-tester-file-attacks) for the untested endpoints — launch MULTIPLE task calls in a single message for parallel coverage.",
+                  "For each endpoint: either prove a finding with report_vulnerability, or — if genuinely nothing is there — close it with record_coverage_note + update_vrt_check (two distinct techniques).",
+                  `Keep going until per-asset coverage reaches at least ${SURFACE_COVERAGE_FLOOR}%. Dispatch the next batch of specialists now.`,
+                  "</system-reminder>",
+                ].join("\n"),
+              } satisfies MessageV2.TextPart)
+              continue
+            }
+            log.warn("surface-coverage hard-stop — yielding (coverage stalled)", {
+              sessionID,
+              coveragePercent: worst,
+              forcedContinuations,
+            })
+          }
+        }
+
+        log.info("exiting loop", { sessionID })
         break
       }
 
@@ -996,13 +1094,25 @@ export namespace SessionPrompt {
 
       if (result === "stop") break
       if (result === "compact") {
+        // Bước 5.2: if we keep landing here without the loop ever advancing, compaction is not
+        // shrinking the prompt — bail instead of spinning on the same overflow error forever.
+        consecutiveCompactions++
+        if (consecutiveCompactions > MAX_CONSECUTIVE_COMPACTIONS) {
+          log.error("compaction made no progress — aborting turn to avoid infinite compact loop", {
+            sessionID,
+            consecutiveCompactions,
+          })
+          break
+        }
         await SessionCompaction.create({
           sessionID,
           agent: lastUser.agent,
           model: lastUser.model,
           auto: true,
         })
+        continue
       }
+      consecutiveCompactions = 0
       continue
     }
     SessionCompaction.prune({ sessionID })

@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [session, cookies, csrf, token, wstg, sess]
 tech_stack: []
 cwe_ids: [CWE-384]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-sess-02, wstg-sess-09]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-sess-02: "No effective timeout + missing HttpOnly/Secure = a token stolen via XSS or sniffing stays valid indefinitely, maximizing the hijack window (High)"
+  wstg-sess-09: "No timeout enforcement + confirmed session hijacking = a stolen token stays valid indefinitely, giving unlimited time to exploit or monetize access instead of a narrow window (High)"
 ---
 
 # wstg-sess-07
@@ -173,6 +175,44 @@ tester.test_idle_timeout(
 
 ---
 
+## Tools
+
+| Tool               | Description             | Usage                                    |
+| -------------------- | ------------------------- | ------------------------------------------ |
+| **Burp Suite**      | Repeater + scheduled send | Replay session token at timed intervals  |
+| **OWASP ZAP**       | Automated session tests   | Session timeout scanner                  |
+| **cron / at**       | Scheduling delayed checks | Poll session validity without blocking   |
+| **curl + sleep**    | Command-line timing tests | Scripted idle/absolute timeout checks    |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+# Get a session then poll it every 5 minutes to find the idle timeout window
+SESSION=$(curl -s -c - -X POST "https://{target}/login" -d "username=test&password=test" | grep -oP "SESSIONID=\K[^;]+")
+for m in 5 10 15 30 60 120; do
+    sleep 300
+    code=$(curl -s -o /dev/null -w "%{http_code}" -b "SESSIONID=$SESSION" "https://{target}/dashboard")
+    echo "After ${m}m: HTTP $code"
+    [ "$code" != "200" ] && break
+done
+
+# Test that a single "keep-alive" request does NOT indefinitely extend an absolute timeout
+SESSION=$(curl -s -c - -X POST "https://{target}/login" -d "username=test&password=test" | grep -oP "SESSIONID=\K[^;]+")
+for h in 1 2 4 8 12 24; do
+    sleep 3600
+    curl -s -o /dev/null -b "SESSIONID=$SESSION" "https://{target}/ping"   # simulate light activity
+    code=$(curl -s -o /dev/null -w "%{http_code}" -b "SESSIONID=$SESSION" "https://{target}/dashboard")
+    echo "After ${h}h (with keep-alive pings): HTTP $code"
+done
+
+# Check exp claim window for JWT-based sessions instead of waiting in real time
+echo "{jwt_token}" | cut -d'.' -f2 | base64 -d 2>/dev/null | jq '.exp, .iat, (.exp-.iat)'
+```
+
+---
+
 ## Remediation Guide
 
 ### Timeout Implementation
@@ -231,6 +271,13 @@ def login():
 | CWE ID      | Title                           |
 | ----------- | ------------------------------- |
 | **CWE-613** | Insufficient Session Expiration |
+
+---
+
+## References
+
+- [OWASP WSTG - Testing Session Timeout](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/06-Session_Management_Testing/07-Testing_Session_Timeout)
+- [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
 
 
 ---

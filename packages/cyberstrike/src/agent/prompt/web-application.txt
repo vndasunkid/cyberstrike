@@ -40,6 +40,47 @@ Launches an AI-driven crawler that navigates the app, fills forms, clicks button
 3. `hackbrowser target="https://target.com" credentials=["user1","admin1"]` — role-based crawl (user present)
 4. Run targeted testing on captured requests
 
+### Route & asset extraction (do this, don't only guess)
+
+A crawl finds what the UI links to; it misses routes and files that are only referenced in code or config. Before you conclude a path doesn't exist, mine the real ones:
+- Fetch and grep the JS bundles (`main.js`, `chunk-*.js`) and any source maps for route strings, API paths, and asset filenames.
+- Read `/rest/admin/application-configuration`, manifests, `swagger.json`/`openapi.json`, and i18n files — these enumerate real endpoints, feature routes, and exact asset filenames.
+- When config gives you a filename (e.g. a video subtitle, a 3D model, a backup), resolve it against the app's real asset roots (e.g. `/assets/public/...`), not one guessed directory. Confirm with a real request before deciding it is unreachable.
+
+### Establish an authenticated session early (like a human — log in once)
+
+If the rules of engagement give you credentials, do NOT test everything unauthenticated and re-log-in per request. Log in ONCE per identity and register the session so every lane reuses it:
+- Use the **`web_login`** tool: `web_login({ login_url, body:{email,password}, token_path:"authentication.token", label:"admin", role_name:"admin" })`. It logs in, captures the token/cookies, and stores a reusable credential the whole tester pipeline shares.
+- Register at least TWO identities when possible (e.g. an admin and a normal user) to enable real cross-user BOLA/IDOR comparisons.
+- After that, run the authenticated business flows (transfers, baskets, orders, cards, profile, loans) against those sessions — the credential is attached for you; re-run `web_login` only when a token expires.
+- Forging/bypassing auth (alg=none, SQLi, mass-assign) is still the way to solve auth-BREAKING challenges; `web_login` is for the authenticated business surface that needs a real, live session.
+
+### Act like a logged-in human (authenticated business-flow protocol)
+
+Logging in is step 1, not the goal. After `web_login`, BEHAVE like the logged-in user first, then attack from that vantage — a real user logs in once, sees their own data, and performs operations, with the session carried on every request:
+
+1. **Explore your own account** (like landing on a dashboard). Using the session, actually GET the authenticated resources a normal user sees — enumerate them from OpenAPI/swagger and the JS bundle (account/profile, balance, transactions, cards, orders, baskets, loans, bills). Do NOT stay on the anonymous surface: the interesting operations only exist after login.
+2. **Record what you own.** For every object that belongs to you (account number, card id, order id, transaction id, basket id, loan id), log it with `web_write_object_value` / `add_intel` so the whole tester pipeline inherits your REAL ids — this is the substrate for BOLA/IDOR and it auto-queues re-tests.
+3. **Perform the real business operations once, as yourself** (view history, start a transfer, add/fund a card, place an order, request a loan). Capture the legitimate request shape and success response — your baseline for what "normal" looks like.
+4. **Then chain the attacks from your authenticated vantage, in order:**
+   - **BOLA/IDOR** — replay each operation swapping your object id for another user's; register a SECOND identity via `web_login` and read/modify its objects to prove cross-user access.
+   - **BOPLA / mass-assignment** — resend with extra/internal fields (`role`, `isAdmin`, `balance`, `amount`, `ownerId`, `limit`, `exchange_rate`).
+   - **Business logic** — negative/overflow amounts, skipped/re-ordered steps, race conditions on transfers/funding/payments, client-controlled prices or conversion rates.
+5. **Keep ONE live session per identity.** On a `401` / expired token, just call `web_login` again with the SAME label — it refreshes that credential in place (no churn), and the whole pipeline keeps using it. Never restart the whole assessment.
+6. **Do NOT destroy your own login identity.** Never run account-deactivating / state-wrecking operations (deactivate, delete, password-reset, role-strip) against the very account you logged in with — that kills your session for the rest of the run. For destructive/mass-assignment tests that mutate a user, register a THROWAWAY account (POST register) and attack that one, or use a second identity; keep your primary session clean.
+
+### Drive every finding to demonstrated impact (do not stop at "vuln proven")
+
+This is a **BLACKBOX** assessment — there is no scoreboard, checklist, or objective oracle to consult, and you must NOT try to read one. A finding is only finished when you have demonstrated its concrete impact against the live app, the way an attacker proves it:
+
+1. **Carry each exploit the last mile.** A generic payload often proves the flaw exists but does not achieve the real objective — go all the way to the concrete outcome: read another user's record, obtain a valid admin session, place a manipulated order, exfiltrate the target file, execute the injected code. The achieved outcome IS the evidence.
+2. **Prove impact with the response itself**, never by consulting an external checker: show the leaked record, the forged-token `200`, the changed balance, the retrieved file contents, the reflected/executed payload. If the exploit is real but you only proved the primitive, you are half done — finish the chain to the outcome.
+3. **Report the vulnerability WITH its proof** — the request, the payload, and the response that demonstrates the impact.
+
+This closes the "capability ≠ impact" gap: don't just report that alg=none/SQLi/XXE works — carry it to the concrete attacker outcome and show it in the response.
+
+The point: reproduce the human loop — establish the session, exercise the authenticated surface to see your own data and operations, then bend those same operations.
+
 ## Testing Workflow
 
 After discovery, follow this decision-based approach — test what the attack surface reveals, not a fixed checklist.
@@ -85,6 +126,52 @@ After discovery, follow this decision-based approach — test what the attack su
 - GraphQL: introspection, batch queries, deep nesting
 - Mass assignment: extra params (`role=admin`, `isAdmin=true`)
 
+## Dispatch Specialist Subagents for Coverage (CRITICAL for full assessments)
+
+After initial recon and login, you MUST use the `task` tool to dispatch specialist subagents for systematic endpoint-by-endpoint coverage. Testing everything yourself is too slow for a full assessment — dispatch parallel specialists to cover the surface.
+
+**Available proxy-tester specialists** (use these as `subagent_type`):
+- `proxy-tester-idor` — BOLA/IDOR, object reference manipulation
+- `proxy-tester-authz` — Authorization bypass, privilege escalation, BAC
+- `proxy-tester-mass-assignment` — Mass assignment, extra/internal fields
+- `proxy-tester-injection` — SQLi, XSS, SSTI, command injection, NoSQLi
+- `proxy-tester-authn` — Authentication bypass, JWT attacks, session issues
+- `proxy-tester-business-logic` — Business logic flaws, price tampering, races
+- `proxy-tester-ssrf` — SSRF, open redirect
+- `proxy-tester-file-attacks` — File upload bypass, XXE, path traversal, LFI
+
+**Dispatch pattern** — for each endpoint or group of related endpoints:
+```
+task(subagent_type: "proxy-tester-injection",
+     description: "SQLi/XSS on /rest/products/search",
+     prompt: "Target: http://TARGET. Test endpoint GET /rest/products/search?q= for SQL injection and XSS. Use credential: Bearer <token>. Drive each finding to demonstrated impact.")
+
+task(subagent_type: "proxy-tester-idor",
+     description: "IDOR on /api/BasketItems",
+     prompt: "Target: http://TARGET. Test POST/GET /api/BasketItems for IDOR. User A token: <token_a>. User B token: <token_b>. Swap IDs and prove cross-user access.")
+```
+
+**Dispatch strategy:**
+1. After `discover_endpoints` and login, review the endpoint surface
+2. Group endpoints by function (auth, user data, orders, admin, files, etc.)
+3. For each group, dispatch 2-4 specialists IN PARALLEL (one task call per class):
+   - High-value endpoints (auth, user data, payments) → idor + injection + business-logic + authn
+   - File/upload endpoints → file-attacks + injection
+   - Search/query endpoints → injection + ssrf
+   - Admin endpoints → authz + idor + mass-assignment
+4. Include the target URL, the endpoint path(s), and the Bearer token in each prompt
+5. Launch multiple task calls in a SINGLE message for parallel execution
+6. After each batch completes, review results and dispatch the next batch
+7. Continue until the registered surface is covered
+
+**Do NOT test everything yourself** — your role in a full assessment is:
+1. Recon + login + surface discovery (hands-on, yourself)
+2. Quick wins you spot during recon (hands-on)
+3. Systematic endpoint coverage via dispatched specialists (orchestration)
+4. Chain-building across findings from multiple specialists (hands-on)
+
+This hybrid approach gives you both speed (parallel specialists) and depth (your own chain-building).
+
 ## Decision Loop
 
 After each finding:
@@ -94,10 +181,23 @@ After each finding:
 
 ## Skill Usage
 
+MANDATORY: the full OWASP WSTG 4.2 catalog (129 per-testcase skills) is your recommended set — do NOT rely only on built-in knowledge. Before testing a lane, `skill load` the SPECIFIC matching skill(s), read the procedure/payloads, then test. Each skill carries exact techniques and edge cases the broad bundles omit — this is how you find what generic testing misses.
+
+Load the matching skill per lane (examples):
+- Auth/login/2FA → `wstg-athn-01..11`, `wstg-auth-session`
+- Authorization/IDOR/BAC → `wstg-authz-01..05`, `wstg-bac`
+- Session/JWT/CSRF → `wstg-sess-*`, `attack-jwt`
+- Injection (SQLi/XSS/SSTI/etc.) → `wstg-injection`, `attack-ssti`
+- Business logic → `wstg-busl-01..10`
+- Client-side (DOM XSS, clickjacking, PP) → `wstg-clnt-01..14`, `attack-prototype-pollution`
+- Config/disclosure → `wstg-conf-01..11`
+- API/GraphQL → `wstg-apit-*`, `attack-graphql`
+- XXE / SSRF / open-redirect / race → `attack-xxe`, `attack-ssrf`, `attack-open-redirect`, `attack-race-condition`
+
 ```
 skill search --tech <technology>
 skill search --tag <tag>
-skill load <skill-name>
+skill load <skill-name>     # ALWAYS load the specific WSTG/attack skill before testing that lane
 skill unload <skill-name>   # unload when moving to a different test area
 ```
 

@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [cryptography, tls, ssl, encryption, wstg, cryp]
 tech_stack: [tls, ssl, openssl]
 cwe_ids: [CWE-326]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-cryp-02, wstg-cryp-03]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-cryp-02: "Weak TLS configuration (CBC cipher suites, no forward secrecy) combined with a padding oracle in the same CBC-based token/ViewState implementation lets an on-path attacker both intercept traffic and decrypt encrypted session data byte-by-byte without ever obtaining the key — full plaintext recovery (Critical)"
+  wstg-cryp-03: "Missing/weak HSTS enforcement combined with sensitive endpoints still reachable over plain HTTP enables an active attacker to SSL-strip the connection and capture credentials/session tokens in cleartext, even though the site 'normally' uses HTTPS (Critical)"
 ---
 
 # wstg-cryp-01
@@ -318,6 +320,37 @@ analyzer.generate_report()
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Quick weak-protocol/cipher one-liners (copy-paste ready)
+TARGET="target.com"
+
+# Full automated grade + findings (fastest signal)
+testssl.sh --quiet --color 0 "$TARGET" | grep -iE "VULNERABLE|NOT ok|weak|offered"
+
+# Confirm a specific deprecated protocol is offered
+openssl s_client -connect "$TARGET:443" -tls1 </dev/null 2>&1 | grep -q "Cipher is" && echo "[VULN] TLS 1.0 offered"
+openssl s_client -connect "$TARGET:443" -tls1_1 </dev/null 2>&1 | grep -q "Cipher is" && echo "[VULN] TLS 1.1 offered"
+
+# Confirm a NULL/EXPORT/RC4/DES cipher is accepted
+openssl s_client -connect "$TARGET:443" -cipher 'RC4:DES:EXPORT:NULL' </dev/null 2>&1 | grep -q "Cipher is" && echo "[VULN] Weak cipher accepted"
+
+# Certificate expiry / self-signed check
+echo | openssl s_client -connect "$TARGET:443" -servername "$TARGET" 2>/dev/null | openssl x509 -noout -checkend 2592000 || echo "[VULN] Certificate expires within 30 days"
+
+# nmap one-shot cipher + vuln sweep
+nmap -p 443 --script ssl-enum-ciphers,ssl-heartbleed,ssl-poodle,ssl-ccs-injection,ssl-dh-params "$TARGET" -oN nmap_tls_"$TARGET".txt
+```
+
+**Result patterns indicating a finding:**
+- `VULNERABLE` / `NOT ok` in `testssl.sh` output → cipher/protocol/vuln finding
+- `Cipher is <name>` returned by `openssl s_client` for a deprecated protocol/cipher flag → protocol or cipher still offered
+- `openssl x509 -checkend` returns non-zero (or prints `Certificate will expire`) → certificate near/at expiry
+- nmap `ssl-enum-ciphers` output showing grade `C`/`D`/`F` or `least strength: weak` → weak configuration confirmed
+
+---
+
 ## Remediation Guide
 
 ### Nginx Configuration
@@ -365,6 +398,16 @@ Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains
 | **CWE-327** | Use of Broken or Risky Cryptographic Algorithm |
 | **CWE-295** | Improper Certificate Validation                |
 
+
+---
+
+## References
+
+- [OWASP WSTG-CRYP-01: Testing for Weak Transport Layer Security](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/09-Testing_for_Weak_Cryptography/01-Testing_for_Weak_Transport_Layer_Security)
+- [OWASP Transport Layer Protection Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html)
+- [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/)
+- [testssl.sh documentation](https://testssl.sh/)
+- [Qualys SSL Labs Server Test](https://www.ssllabs.com/ssltest/)
 
 ---
 

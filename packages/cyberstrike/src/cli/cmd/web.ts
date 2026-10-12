@@ -72,12 +72,12 @@ export const WebCommand = cmd({
         )
       }
 
-      // Open localhost in browser
-      open(localhostUrl.toString()).catch(() => {})
+      // Open localhost in browser — skip if no display to avoid /bin/sh errors on headless servers
+      if (process.env["DISPLAY"] || process.env["WAYLAND_DISPLAY"]) open(localhostUrl.toString()).catch(() => {})
     } else {
       const displayUrl = server.url.toString()
       UI.println(UI.Style.TEXT_INFO_BOLD + "  Web interface:    ", UI.Style.TEXT_NORMAL, displayUrl)
-      open(displayUrl).catch(() => {})
+      if (process.env["DISPLAY"] || process.env["WAYLAND_DISPLAY"]) open(displayUrl).catch(() => {})
     }
 
     await new Promise(() => {})

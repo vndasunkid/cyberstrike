@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [authentication, login, credentials, mfa, wstg, athn]
 tech_stack: []
 cwe_ids: [CWE-522]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-athn-02, wstg-athn-03]
+prerequisites: [wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-athn-03: "Cleartext-Transported Credentials + Weak Lockout Mechanism = an on-path attacker passively harvests live credentials from unencrypted login traffic, then freely tests those and related password guesses against other accounts with no attempt throttling to stop them (Network-Wide Credential Harvesting, Critical)"
 ---
 
 # wstg-athn-01

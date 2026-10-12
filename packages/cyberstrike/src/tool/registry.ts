@@ -8,6 +8,7 @@ import { ReadTool } from "./read"
 import { TaskTool } from "./task"
 import { TodoWriteTool, TodoReadTool } from "./todo"
 import { ReportVulnerabilityTool } from "./vulnerability"
+import { DiscoverEndpointsTool } from "./discover-endpoints"
 import { TriageVulnerabilityTool } from "./triage-vulnerability"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
@@ -43,6 +44,7 @@ import { InjectProbeTool } from "./inject-probe"
 import { WebGetVulnerabilitiesTool } from "./web-get-vulnerabilities"
 import { WebGetVulnDetailTool } from "./web-get-vuln-detail"
 import { WebUpdateCredentialClaimsTool } from "./web-update-credential-claims"
+import { WebLoginTool } from "./web-login"
 import { HackbrowserTool } from "./hackbrowser"
 import { AddIntelTool } from "./intel"
 import { UpdateVrtCheckTool } from "./vrt-check"
@@ -152,6 +154,7 @@ export namespace ToolRegistry {
       WebFetchTool,
       TodoWriteTool,
       ReportVulnerabilityTool,
+      DiscoverEndpointsTool,
       TriageVulnerabilityTool,
       // TodoReadTool,
       WebSearchTool,
@@ -180,6 +183,7 @@ export namespace ToolRegistry {
       WebGetVulnerabilitiesTool,
       WebGetVulnDetailTool,
       WebUpdateCredentialClaimsTool,
+      WebLoginTool,
       // Hackbrowser — autonomous crawler that produces captures the
       // proxy-analyzer ingests. Upstream of the rest of the web pipeline.
       HackbrowserTool,

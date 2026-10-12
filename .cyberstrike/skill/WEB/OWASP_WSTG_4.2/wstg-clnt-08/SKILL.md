@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [client-side, javascript, dom, cors, wstg, clnt]
 tech_stack: [html, javascript]
 cwe_ids: [CWE-1021]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-clnt-01, wstg-clnt-01.1]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-clnt-01: "Wildcard crossdomain.xml + a SWF that calls getURL('asfunction:...')/ExternalInterface on unsanitized FlashVars = any external domain can load the SWF to execute arbitrary JavaScript in the embedding page's origin, turning a legacy policy misconfig into full DOM XSS/session theft (Medium -> High)"
 ---
 
 # wstg-clnt-08
@@ -79,6 +80,59 @@ done
 
 ---
 
+## Tools
+
+| Tool               | Purpose                                              |
+| ------------------- | ------------------------------------------------------ |
+| **curl**             | Fetch and inspect `crossdomain.xml` / SWF files          |
+| **swfdump / RABCDAsm** | Decompile SWF to inspect ActionScript for unsafe loads  |
+| **Burp Suite**       | Intercept SWF loading and cross-domain policy requests    |
+
+---
+
+## Example Commands/Payloads
+
+### Locate Flash content and policy files
+
+```bash
+TARGET="{target}"
+curl -s "https://$TARGET" | grep -oP '[^"]+\.swf'
+curl -s "https://$TARGET/crossdomain.xml"
+curl -s "https://$TARGET/clientaccesspolicy.xml"
+for path in /crossdomain.xml /clientaccesspolicy.xml /flash/crossdomain.xml; do
+    curl -s "https://$TARGET$path"
+done
+```
+
+### Vulnerable policy pattern to flag
+
+```xml
+<?xml version="1.0"?>
+<cross-domain-policy>
+    <allow-access-from domain="*"/>
+</cross-domain-policy>
+```
+
+### Silverlight equivalent (clientaccesspolicy.xml) wildcard check
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<access-policy>
+  <cross-domain-access>
+    <policy>
+      <allow-from http-request-headers="*">
+        <domain uri="*"/>
+      </allow-from>
+      <grant-to>
+        <resource path="/" include-subpaths="true"/>
+      </grant-to>
+    </policy>
+  </cross-domain-access>
+</access-policy>
+```
+
+---
+
 ## Remediation
 
 ```xml
@@ -100,6 +154,23 @@ done
 | Wildcard crossdomain.xml | 5.3  | Medium   |
 | XSF vulnerability        | 6.1  | Medium   |
 
+
+---
+
+## CWE Categories
+
+| CWE ID | Title | Description |
+| --- | --- | --- |
+| **CWE-352** | Cross-Site Request Forgery (CSRF) | Flash movie makes state-changing cross-domain requests without origin verification |
+| **CWE-346** | Origin Validation Error | Missing/misconfigured crossdomain.xml allows untrusted domains to interact with the SWF |
+
+---
+
+## References
+
+- [OWASP WSTG - Testing for Cross Site Flashing (WSTG-CLNT-08)](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/08-Testing_for_Cross_Site_Flashing)
+- [Adobe - Cross-domain policy file specification](https://www.adobe.com/devnet-docs/acrobatetk/tools/AppSec/xdomain.html)
+- [OWASP Testing for Flash Guide (legacy)](https://owasp.org/www-project-web-security-testing-guide/)
 
 ---
 

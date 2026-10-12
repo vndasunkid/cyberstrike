@@ -34,6 +34,7 @@ import { Log } from "../util/log"
 import { Identifier } from "../id/id"
 import { Session } from "../session"
 import { HackbrowserStatus } from "../session/hackbrowser-status"
+import { RouteExtraction } from "../session/route-extraction"
 import { Global } from "../global"
 import type {
   WorkerOptions,
@@ -126,11 +127,16 @@ interface PreparedWorker {
  * can surface the error to the tool caller without poisoning the slot.
  */
 async function prepareCrawl(opts: LauncherOptions): Promise<PreparedWorker> {
-  // 1. Locate worker JS — placed by postinstall at Global.Path.bin.
-  const workerPath = path.join(Global.Path.bin, "hackbrowser-worker.js")
-  if (!existsSync(workerPath)) {
+  // 1. Locate worker JS — placed by postinstall at Global.Path.bin, or next to the running binary.
+  const workerFilename = "hackbrowser-worker.js"
+  const workerCandidates = [
+    path.join(Global.Path.bin, workerFilename),
+    path.join(path.dirname(Bun.main), workerFilename),
+  ]
+  const workerPath = workerCandidates.find(existsSync)
+  if (!workerPath) {
     throw new Error(
-      `hackbrowser worker not found at ${workerPath}. ` +
+      `hackbrowser worker not found (checked: ${workerCandidates.join(", ")}). ` +
         `Re-install cyberstrike (npm install -g @cyberstrike-io/cyberstrike) to set it up.`,
     )
   }
@@ -147,8 +153,9 @@ async function prepareCrawl(opts: LauncherOptions): Promise<PreparedWorker> {
   // here so the error surfaces as a clean message instead.
   // Bun.resolve mirrors the worker's actual module lookup (upward traversal
   // from bin/ + NODE_PATH), so no false positives on non-standard installs.
+  const workerDir = path.dirname(workerPath)
   try {
-    await Bun.resolve("playwright", Global.Path.bin)
+    await Bun.resolve("playwright", workerDir)
   } catch {
     throw new Error(
       `playwright is not installed. Run:\n` +
@@ -389,6 +396,14 @@ async function backgroundRun(
               })
               // Karar 2 in §13.1: success stays sidebar-only. No synthetic
               // message — LLM doesn't get nudged into polling loops.
+              // plan_A2.md §9 "Phương án A": a UI-driven crawl misses hidden
+              // routes (JS-bundle-only APIs, /ftp, backup files). Mine them now
+              // and re-feed live ones through /session/ingest so each gets its
+              // own test orchestration. Fire-and-forget — never blocks or fails
+              // the crawl lifecycle.
+              void RouteExtraction.run({ sessionID, target: targetUrl }).catch((err) =>
+                log.error("route-extraction failed (non-fatal)", { sessionID, error: String(err) }),
+              )
             }
             break outer
           }

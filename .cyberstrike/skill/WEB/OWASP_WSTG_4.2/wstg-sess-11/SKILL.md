@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [session, cookies, csrf, token, wstg, sess]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-sess-01, wstg-sess-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-sess-01: "Weak/low-entropy session tokens combined with no concurrent-session limit let an attacker hold many guessed IDs active simultaneously with no lockout, turning token prediction into scaled session brute-forcing (High)"
 ---
 
 # wstg-sess-11
@@ -217,6 +218,50 @@ tester.test_session_limit(credentials)
 
 ---
 
+## Tools
+
+| Tool               | Description               | Usage                                     |
+| -------------------- | --------------------------- | -------------------------------------------- |
+| **Burp Suite**      | Multiple Repeater tabs      | Run parallel authenticated sessions        |
+| **OWASP ZAP**       | Session management add-on   | Track/compare concurrent session tokens    |
+| **GNU parallel**    | Parallel curl execution     | Bulk-create concurrent sessions            |
+| **curl**            | Scripted login/termination  | Reproducible concurrent-session checks     |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+# Create two sessions for the same account with different User-Agents
+S1=$(curl -s -c - -X POST "https://{target}/login" -d "username={user}&password={pass}" \
+    -A "Device-A/1.0" | grep -oP "SESSIONID=\K[^;]+")
+S2=$(curl -s -c - -X POST "https://{target}/login" -d "username={user}&password={pass}" \
+    -A "Device-B/1.0" | grep -oP "SESSIONID=\K[^;]+")
+
+curl -s -o /dev/null -w "Session1: %{http_code}\n" -b "SESSIONID=$S1" "https://{target}/dashboard"
+curl -s -o /dev/null -w "Session2: %{http_code}\n" -b "SESSIONID=$S2" "https://{target}/dashboard"
+
+# Change password from session1, verify session2 is invalidated
+curl -s -X POST "https://{target}/api/change-password" \
+    -b "SESSIONID=$S1" -d "old_password={pass}&new_password={newpass}"
+curl -s -o /dev/null -w "Session2 after pwd change: %{http_code}\n" \
+    -b "SESSIONID=$S2" "https://{target}/dashboard"
+# 200/"Welcome" => [VULN] other sessions not invalidated after password change
+
+# Flood login to probe for a concurrent-session cap
+for i in $(seq 1 10); do
+    curl -s -o /dev/null -w "Login $i: %{http_code}\n" \
+        -X POST "https://{target}/login" -d "username={user}&password={pass}" \
+        -A "Device-$i/1.0"
+done
+
+# Check for a self-service "active sessions" / "log out other devices" endpoint
+curl -s -b "SESSIONID=$S1" "https://{target}/settings/sessions"
+curl -s -X POST -b "SESSIONID=$S1" "https://{target}/settings/sessions/terminate-all"
+```
+
+---
+
 ## Remediation Guide
 
 ### Session Management Implementation
@@ -289,6 +334,13 @@ def change_password():
 | ----------- | ------------------------------- |
 | **CWE-613** | Insufficient Session Expiration |
 | **CWE-384** | Session Fixation                |
+
+---
+
+## References
+
+- [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
+- [OWASP Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)
 
 
 ---

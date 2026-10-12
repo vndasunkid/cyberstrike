@@ -8,8 +8,8 @@ author: cyberstrike-official
 tags: [api, rest, graphql, soap, wstg, apit]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
+chains_with: [wstg-apit-01, wstg-apit-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
 severity_boost: {}
 ---
 
@@ -263,6 +263,87 @@ checker.generate_report()
 | **OWASP ZAP**       | Automated API scanning        |
 | **Insomnia**        | API client                    |
 | **GraphQL Voyager** | GraphQL visualization         |
+
+---
+
+## Example Commands/Payloads
+
+### Initial API Discovery Cheat Sheet
+
+```bash
+TARGET="{target}"
+
+# Swagger / OpenAPI / API doc discovery
+for path in swagger.json swagger/v1/swagger.json openapi.json v2/api-docs v3/api-docs \
+            api-docs api/swagger.json .well-known/openapi.json redoc api/docs; do
+  code=$(curl -s -o /dev/null -w "%{http_code}" "https://$TARGET/$path")
+  [ "$code" != "404" ] && echo "[FOUND] /$path -> $code"
+done
+
+# Pull and pretty-print the spec once found
+curl -s "https://$TARGET/swagger.json" | jq '.paths | keys'
+curl -s "https://$TARGET/openapi.json" | jq '.paths | keys'
+
+# GraphQL endpoint probe (single request, no auth needed)
+curl -s -X POST "https://$TARGET/graphql" -H "Content-Type: application/json" \
+    -d '{"query":"{ __typename }"}'
+
+# SOAP/WSDL discovery
+curl -s "https://$TARGET/service?wsdl"
+curl -s "https://$TARGET/api/service.asmx?wsdl"
+
+# API version sweep
+for v in v1 v2 v3 v4; do
+  curl -s -o /dev/null -w "/api/$v -> %{http_code}\n" "https://$TARGET/api/$v"
+done
+
+# Endpoint fuzzing once a base path is known
+ffuf -u "https://$TARGET/api/FUZZ" -w /usr/share/wordlists/seclists/Discovery/Web-Content/api/api-endpoints.txt \
+    -mc 200,201,204,301,302,401,403 -o api-discovery.json
+```
+
+### Detection Patterns
+
+| Signal                                    | Meaning                              |
+| -------------------------------------------- | ----------------------------------------- |
+| `200` on `swagger.json`/`openapi.json`         | Full API surface disclosed — enumerate `paths` |
+| `__typename` responds without error            | GraphQL endpoint confirmed, try introspection |
+| `?wsdl` returns XML service description        | SOAP endpoint — extract operations/params |
+| Non-`404` on `/api/v1` but `404` on `/api/v4`   | Active API version range identified   |
+
+---
+
+## Remediation Guide
+
+- **Inventory & documentation**: maintain an up-to-date API inventory (all versions, all environments); never expose Swagger/OpenAPI/GraphQL introspection in production without authentication.
+- **AuthN/AuthZ**: enforce object-level and function-level authorization checks on every endpoint server-side — never trust client-supplied IDs or roles (see `wstg-apit-02` for BOLA specifics).
+- **Rate limiting & resource limits**: apply per-user/per-IP rate limiting, request size caps, and query complexity/depth limits (GraphQL) to prevent abuse and DoS (see `wstg-apit-99`).
+- **Input validation**: validate content-type, schema, and payload structure server-side regardless of what client SDKs enforce; reject unexpected fields (mass assignment).
+- **Versioning hygiene**: deprecate and fully decommission old API versions rather than leaving them reachable alongside current ones.
+
+---
+
+## Risk Assessment
+
+This is an overview/entry-point skill — actual severity depends on which specific API weakness is confirmed via the chained skills (`wstg-apit-01` Recon, `wstg-apit-02` BOLA, `wstg-apit-99` GraphQL). As a general guide:
+
+| Finding Category | Typical CVSS Range | Severity |
+| --- | --- | --- |
+| Broken Object/Function Level Authorization (BOLA/BFLA) | 7.5 - 9.8 | High-Critical |
+| Missing/weak authentication on endpoint | 8.0 - 9.8 | High-Critical |
+| Excessive data exposure / verbose errors | 5.3 - 6.5 | Medium |
+| Missing rate limiting | 5.3 | Medium |
+| Undocumented/deprecated endpoint reachable | 5.3 - 7.5 | Medium-High |
+
+---
+
+## CWE Categories
+
+| CWE ID | Title | Description |
+| --- | --- | --- |
+| **CWE-284** | Improper Access Control | Umbrella category for BOLA/BFLA findings across API endpoints |
+| **CWE-200** | Exposure of Sensitive Information to an Unauthorized Actor | Excessive data exposure, verbose API errors |
+| **CWE-799** | Improper Control of Interaction Frequency | Missing/insufficient API rate limiting |
 
 ---
 

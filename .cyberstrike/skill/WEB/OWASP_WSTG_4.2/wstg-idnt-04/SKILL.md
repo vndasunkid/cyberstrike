@@ -8,7 +8,7 @@ author: cyberstrike-official
 tags: [identity, user-enum, roles, wstg, idnt]
 tech_stack: []
 cwe_ids: []
-chains_with: []
+chains_with: [wstg-idnt-01, wstg-idnt-02]
 prerequisites: []
 severity_boost: {}
 ---

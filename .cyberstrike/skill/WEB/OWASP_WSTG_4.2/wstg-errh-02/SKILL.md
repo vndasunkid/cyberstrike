@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [error-handling, information-leak, stack-trace, wstg, errh]
 tech_stack: []
 cwe_ids: [CWE-209]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-errh-01, wstg-info-01]
+prerequisites: [wstg-info-01, wstg-info-02]
+severity_boost:
+  wstg-errh-01: "Stack trace/debug-mode exposure combined with verbose DB/SQL error disclosure gives an attacker the exact file paths, line numbers, and query structure needed to craft precise SQLi or deserialization exploits instead of blind guessing (High)"
 ---
 
 # wstg-errh-02
@@ -224,6 +225,51 @@ tester.generate_report()
 
 ---
 
+## Tools
+
+| Tool           | Description                              | Usage                                   |
+| -------------- | ----------------------------------------- | ---------------------------------------- |
+| **curl**       | Manual error-triggering requests          | `curl -s target.com/api?id='`            |
+| **Burp Suite** | Intercept/repeat requests, view raw errors| Repeater on error-prone params           |
+| **OWASP ZAP**  | Automated active scan for exceptions      | Active Scan -> Information Disclosure    |
+| **grep/ripgrep**| Pattern-match stack traces in responses  | `grep -E "at .+\(.+:[0-9]+\)"`           |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+TARGET="https://target.com"
+
+# Fire error-triggering inputs and capture full response for inspection
+for payload in "0" "null" "undefined" "[]" "{}" "'" "1 OR 1=1" "../../etc/passwd" "%s%s%s%s"; do
+  echo "=== payload: $payload ==="
+  curl -s "$TARGET/api/process?input=$payload" -o /tmp/errh2_resp.html -w "status=%{http_code}\n"
+  grep -qiE "traceback|at\s+[a-z0-9_.]+\(.+:[0-9]+\)|stack trace" /tmp/errh2_resp.html && echo "[VULN] stack trace present"
+done
+
+# Detect framework debug pages directly
+curl -s "$TARGET/nonexistent-path-xyz" | grep -q "Using the URLconf defined in" && echo "[VULN] Django DEBUG=True"
+curl -s "$TARGET/nonexistent-path-xyz" | grep -q "Werkzeug Debugger" && echo "[VULN] Flask/Werkzeug debug mode"
+curl -s "$TARGET/nonexistent-path-xyz" | grep -q "Stack Trace:" && echo "[VULN] ASP.NET detailed errors"
+curl -s "$TARGET/nonexistent-path-xyz" | grep -qiE "Fatal error:|Parse error:" && echo "[VULN] PHP errors displayed"
+
+# Language-specific stack trace regex sweep (run against saved response body)
+grep -E 'at\s+[\w.]+\([\w.]+:[0-9]+\)' /tmp/errh2_resp.html          # Java/Node
+grep -E 'File\s+"[^"]+",\s+line\s+[0-9]+' /tmp/errh2_resp.html       # Python
+grep -E 'in\s+/[\w/]+\.php\s+on\s+line\s+[0-9]+' /tmp/errh2_resp.html # PHP
+grep -E 'from\s+[\w/]+\.rb:[0-9]+' /tmp/errh2_resp.html               # Ruby
+```
+
+**Result patterns indicating a finding:**
+- Response contains `Traceback (most recent call last)`, `File "...", line N` → Python stack trace
+- Response contains `at <package.Class>.<method>(<File>:<line>)` → Java/Node stack trace
+- Response contains `in /path/file.php on line N`, `Fatal error:`, `Parse error:` → PHP error disclosure
+- Response contains `Werkzeug Debugger`, `Using the URLconf defined in`, `Whitelabel Error Page`, `at Layer.handle` → framework debug mode exposed (High severity — often includes an interactive console)
+- Response contains `Stack Trace:` with `.aspx`/`.cs` file references → ASP.NET detailed errors enabled
+
+---
+
 ## Remediation Guide
 
 ### Disable Debug Mode
@@ -270,6 +316,14 @@ error_log = /var/log/php/error.log
 | **CWE-209** | Generation of Error Message Containing Sensitive Information |
 | **CWE-215** | Insertion of Sensitive Information Into Debugging Code       |
 
+
+---
+
+## References
+
+- [OWASP WSTG-ERRH-02: Testing for Stack Traces](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/08-Testing_for_Error_Handling/02-Testing_for_Stack_Traces)
+- [OWASP Error Handling Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Error_Handling_Cheat_Sheet.html)
+- [CWE-209: Generation of Error Message Containing Sensitive Information](https://cwe.mitre.org/data/definitions/209.html)
 
 ---
 

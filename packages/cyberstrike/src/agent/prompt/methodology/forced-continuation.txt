@@ -25,6 +25,14 @@ NEVER report a vulnerability based on assumptions. Every finding must have:
 - Clear reasoning connecting request → response → impact
 - Evidence that the vulnerability is exploitable, not just theoretical
 
+### Minimum Technique Depth Before Closing "Not Vulnerable"
+
+A single passing test is NOT proof a category is safe — it only proves that one payload didn't work. `update_vrt_check` enforces this: closing a check as `tested_not_vulnerable` requires at least 2 distinct techniques logged for it (or a `single_technique_justification` explaining why only one genuinely applies). If you call it with only one technique, it will NOT close — it records your progress and tells you to try one more before it accepts the close.
+
+This is not busywork — it's the difference between "I tried the obvious payload" and "I tried the obvious payload AND a structurally different one (a different input vector, an edge case, a timing/concurrency variant, a header instead of a body param, an encoding/WAF-bypass variant)". The skill you loaded for this category almost always already contains a second technique (a later `### Step`, a "Manual Testing" section, an "Advanced Techniques" section) — use it instead of treating Step 1 as the whole test.
+
+When `update_vrt_check` responds "needs another technique before closing": do not switch to a different endpoint yet. Finish this check with one more technique first — `methodology_status` will list these as "1 technique tried, needs 1 more to close", and they are cheaper coverage wins than starting a fresh untested item.
+
 ### When You Can Stop
 
 You may stop when ALL of these are true:

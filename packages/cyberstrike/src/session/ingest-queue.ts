@@ -5,10 +5,18 @@ import { SessionQueueStatus } from "./queue-status"
 const log = Log.create({ service: "ingest-queue" })
 
 export namespace IngestQueue {
+  // Priority (plan_fix.md "nhanh → ra rộng → sâu"): the queue drains highest-value work FIRST so a
+  // session that is cut short has already covered the important surface, and only goes deep once
+  // breadth is done. Lower number = sooner. Fresh high-signal captures (0) beat plain page GETs
+  // (1); deep re-tests (2) run only after all fresh work is drained. Within one priority: FIFO.
+  export const Priority = { HIGH: 0, NORMAL: 1, DEEP: 2 } as const
+  type Job = { task: () => Promise<unknown>; priority: number; seq: number }
   type State = {
-    chain: Promise<void>
+    jobs: Job[] // pending, not yet started — drained by priority then FIFO
+    running: boolean // a worker loop is currently draining this session
     paused: boolean
     pending: number
+    seq: number // monotonic tiebreaker to keep same-priority jobs FIFO
     resumeSignal: Promise<void> | null
     resumeResolve: (() => void) | null
   }
@@ -22,9 +30,11 @@ export namespace IngestQueue {
     let s = state()[sessionID]
     if (!s) {
       s = {
-        chain: Promise.resolve(),
+        jobs: [],
+        running: false,
         paused: false,
         pending: 0,
+        seq: 0,
         resumeSignal: null,
         resumeResolve: null,
       }
@@ -44,7 +54,7 @@ export namespace IngestQueue {
   function maybeCleanup(sessionID: string) {
     const s = state()[sessionID]
     if (!s) return
-    if (s.pending === 0 && !s.paused) {
+    if (s.pending === 0 && !s.paused && !s.running && s.jobs.length === 0) {
       delete state()[sessionID]
     }
   }
@@ -60,26 +70,43 @@ export namespace IngestQueue {
     return s.resumeSignal
   }
 
-  export function enqueue(sessionID: string, task: () => Promise<unknown>) {
+  export function enqueue(sessionID: string, task: () => Promise<unknown>, priority: number = Priority.NORMAL) {
     const s = getOrInit(sessionID)
     s.pending++
+    s.jobs.push({ task, priority, seq: s.seq++ })
     publish(sessionID)
+    // Single serial worker per session (preserves the per-session serialization SessionPrompt
+    // requires); idempotent — a second enqueue while draining just adds to the pending set.
+    void drain(sessionID)
+  }
 
-    const next = s.chain
-      .then(() => waitIfPaused(sessionID))
-      .then(task)
-      .then(
-        () => {},
-        (err) => log.error("ingest prompt failed", { sessionID, error: err }),
-      )
-      .then(() => {
+  async function drain(sessionID: string) {
+    const s = getOrInit(sessionID)
+    if (s.running) return
+    s.running = true
+    try {
+      while (true) {
+        await waitIfPaused(sessionID)
         const cur = state()[sessionID]
-        if (cur) cur.pending = Math.max(0, cur.pending - 1)
+        if (!cur || cur.jobs.length === 0) break
+        // Highest priority first; FIFO within the same priority (stable via seq).
+        cur.jobs.sort((a, b) => a.priority - b.priority || a.seq - b.seq)
+        const job = cur.jobs.shift()!
+        try {
+          await job.task()
+        } catch (err) {
+          log.error("ingest prompt failed", { sessionID, error: err })
+        }
+        const after = state()[sessionID]
+        if (after) after.pending = Math.max(0, after.pending - 1)
         publish(sessionID)
-        maybeCleanup(sessionID)
-      })
-
-    s.chain = next
+      }
+    } finally {
+      const cur = state()[sessionID]
+      if (cur) cur.running = false
+      publish(sessionID)
+      maybeCleanup(sessionID)
+    }
   }
 
   export function pause(sessionID: string) {

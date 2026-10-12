@@ -52,80 +52,6 @@ This test aims to identify sensitive information about the target organization t
 
 ## How to Test
 
-### Step 1: Use Multiple Search Engines
-
-Each search engine uses different indexing algorithms. Use multiple engines for comprehensive results:
-
-| Search Engine | URL            | Characteristics                     |
-| ------------- | -------------- | ----------------------------------- |
-| Google        | google.com     | Most comprehensive index            |
-| Bing          | bing.com       | Microsoft ecosystem integration     |
-| DuckDuckGo    | duckduckgo.com | Privacy-focused, aggregated results |
-| Yandex        | yandex.com     | Russia-based, different perspective |
-| Baidu         | baidu.com      | China-based                         |
-
-### Step 2: Apply Basic Search Operators
-
-```
-site:target.com                    # Results only from target domain
-site:target.com filetype:pdf       # PDF files
-site:target.com filetype:xlsx      # Excel files
-site:target.com filetype:docx      # Word documents
-site:target.com filetype:sql       # SQL files
-site:target.com filetype:log       # Log files
-site:target.com filetype:bak       # Backup files
-site:target.com filetype:conf      # Config files
-site:target.com filetype:env       # Environment files
-```
-
-### Step 3: Sensitive Information Search Queries
-
-```
-# Credential Leak Search
-site:target.com intext:"password"
-site:target.com intext:"username" intext:"password"
-site:target.com intext:"api_key" OR intext:"apikey"
-site:target.com intext:"secret_key" OR intext:"secretkey"
-site:target.com filetype:env DB_PASSWORD
-site:target.com intext:"BEGIN RSA PRIVATE KEY"
-
-# Database and Backup
-site:target.com filetype:sql "INSERT INTO"
-site:target.com filetype:bak
-site:target.com inurl:backup
-site:target.com intitle:"index of" "backup"
-
-# Error Messages and Debug
-site:target.com intext:"error" intext:"warning"
-site:target.com intext:"stack trace"
-site:target.com intext:"SQL syntax"
-site:target.com intext:"mysql_fetch"
-site:target.com intext:"ORA-" (Oracle errors)
-site:target.com intext:"pg_" intext:"error" (PostgreSQL)
-
-# Admin and Config Panels
-site:target.com inurl:admin
-site:target.com inurl:login
-site:target.com inurl:config
-site:target.com intitle:"admin" OR intitle:"administrator"
-site:target.com inurl:wp-admin (WordPress)
-site:target.com inurl:phpmyadmin
-
-# Development/Staging Environments
-site:dev.target.com
-site:test.target.com
-site:staging.target.com
-site:uat.target.com
-site:preprod.target.com
-
-# Subdomain Discovery
-site:*.target.com
-
-# Directory Listing
-site:target.com intitle:"index of"
-site:target.com intitle:"directory listing"
-```
-
 ### Step 4: Historical Data Analysis (Wayback Machine)
 
 1. Navigate to https://web.archive.org
@@ -144,19 +70,6 @@ ssl.cert.subject.cn:target.com
 http.title:"Target Application"
 ```
 
-### Step 6: GitHub/GitLab/Bitbucket Code Search
-
-```
-# GitHub search
-"target.com" password
-"target.com" api_key
-"target.com" secret
-org:targetorg password
-org:targetorg api_key
-filename:.env "target"
-filename:config.php "target.com"
-```
-
 ### Step 7: Pastebin and Leak Sites
 
 - Pastebin.com
@@ -172,12 +85,10 @@ filename:config.php "target.com"
 
 | Tool                     | Description                      | Installation/Usage                        |
 | ------------------------ | -------------------------------- | ----------------------------------------- |
-| **theHarvester**         | Email, subdomain, host discovery | `theHarvester -d target.com -b all`       |
 | **Recon-ng**             | Web reconnaissance framework     | `recon-ng`                                |
 | **Maltego**              | OSINT and link analysis          | GUI tool                                  |
 | **SpiderFoot**           | Automated OSINT                  | `spiderfoot -s target.com`                |
 | **Photon**               | Web crawler                      | `python3 photon.py -u https://target.com` |
-| **Google Dorking Tools** | Automated dork queries           | Pagodo, GooFuzz                           |
 | **Amass**                | Subdomain enumeration            | `amass enum -d target.com`                |
 | **Subfinder**            | Subdomain discovery              | `subfinder -d target.com`                 |
 
@@ -200,14 +111,8 @@ filename:config.php "target.com"
 ### theHarvester Commands
 
 ```bash
-# Gather information from all sources
-theHarvester -d target.com -b all
-
-# Specific sources
-theHarvester -d target.com -b google,bing,linkedin,twitter
-
-# Save results to file
-theHarvester -d target.com -b all -f output.html
+# Passive sources only (no search engines)
+theHarvester -d target.com -b crtsh,hackertarget,dnsdumpster
 ```
 
 ### Amass Commands
@@ -240,28 +145,6 @@ subfinder -d target.com -o subdomains.txt
 
 # Recursive search
 subfinder -d target.com -recursive
-```
-
-### Google Dork Examples (Manual)
-
-```
-# Sensitive file types
-site:target.com ext:xml | ext:conf | ext:cnf | ext:reg | ext:inf | ext:rdp | ext:cfg | ext:txt | ext:ora | ext:ini
-
-# Database files
-site:target.com ext:sql | ext:dbf | ext:mdb
-
-# Log files
-site:target.com ext:log
-
-# Backup files
-site:target.com ext:bkf | ext:bkp | ext:bak | ext:old | ext:backup
-
-# Password-containing files
-site:target.com intext:password | intext:passwd filetype:txt | filetype:log | filetype:cfg
-
-# phpinfo()
-site:target.com ext:php intitle:phpinfo "published by the PHP Group"
 ```
 
 ### Shodan CLI
@@ -417,15 +300,12 @@ curl -s "https://crt.sh/?q=%.target.com&output=json" | jq -r '.[].name_value' | 
 ## Checklist
 
 ```
-[ ] Google dorking queries executed
-[ ] Bing search queries executed
 [ ] DuckDuckGo search queries executed
 [ ] Shodan scan performed
 [ ] Wayback Machine historical analysis completed
 [ ] theHarvester OSINT gathered
 [ ] Subdomain enumeration performed (Amass/Subfinder)
 [ ] Certificate transparency check completed (crt.sh)
-[ ] GitHub/GitLab code search performed
 [ ] Pastebin/leak site check completed
 [ ] Discovered sensitive information documented
 [ ] Risk assessment completed

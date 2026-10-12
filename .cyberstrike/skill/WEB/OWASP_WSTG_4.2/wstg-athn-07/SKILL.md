@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [authentication, login, credentials, mfa, wstg, athn]
 tech_stack: []
 cwe_ids: [CWE-287]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-athn-05, wstg-athn-08]
+prerequisites: [wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-athn-05: "Weak Password Policy + Vulnerable Remember-Me Token = a brute-forced or guessed weak password grants initial access, and a predictable/reusable remember-me token turns that one-time credential guess into indefinite persistent access that survives a later password change (Persistent Account Takeover, Critical)"
+  wstg-athn-08: "Weak Password Policy + Weak Security Question Answer = if brute-forcing the (already weak) password fails, the attacker falls back to guessing the equally weak security question to force a reset — two independent low-effort paths to the same account, with no single control closing both (Redundant Account Takeover Paths, High)"
 ---
 
 # wstg-athn-07

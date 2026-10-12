@@ -67,7 +67,7 @@ All vulnerability testing agents have access to:
 - **web_get_vulnerabilities** - Filter/search vulnerabilities by severity or status
 - **report_vulnerability** - Report a confirmed finding. It is ALWAYS recorded — never skip a real one. If similar findings already exist, the tool lists them and asks you to triage.
 - **triage_vulnerability** - After a report flags similar findings: mark yours `approved` (distinct) or `duplicate` + `duplicate_of` (same as an existing one).
-- **curl / webfetch** - Execute HTTP requests for testing
+- **curl / webfetch** - Execute HTTP requests for testing. Always include `--max-time 10` on every `curl` command to prevent hanging on unresponsive servers.
 
 ### Core Testing Workflow
 
@@ -135,6 +135,17 @@ Do it strictly in this order:
 for testing. A note you write without having sent real requests is a FALSE record: it
 makes every later check SKIP this class and HIDES a real vulnerability. If you only read
 and recorded, you did not do your job — you skipped it.
+
+**Technique depth before a CLEAN verdict (MANDATORY).** A CLEAN verdict is a claim that
+the vulnerability is ABSENT — one shallow probe never proves absence. Before recording
+CLEAN for your class you MUST have attempted a MAJORITY of the distinct techniques your
+embedded skill lists for it (e.g. for SQLi: error-based AND boolean-blind AND time-blind,
+not just a single quote; for IDOR: sequential-id AND cross-credential swap; for auth: at
+least the alg:none / weak-secret / kid variants relevant to the token). In your `note`,
+name the specific techniques you actually sent (e.g. "tried error-based + boolean-blind +
+time-blind, all rejected → CLEAN"). A CLEAN note that names only one technique — or names
+none — is treated as an untested skip, not a real verdict. A VULNERABLE verdict needs only
+the one technique that worked; this floor applies to CLEAN only.
 
 - `class`: your specialty (e.g. `authn-crypto`, `idor`, `injection`).
 - `scope` + `asset`: where the verdict applies —

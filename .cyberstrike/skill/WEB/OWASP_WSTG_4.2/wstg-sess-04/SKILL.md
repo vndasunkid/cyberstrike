@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [session, cookies, csrf, token, wstg, sess]
 tech_stack: []
 cwe_ids: [CWE-614]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-sess-01, wstg-sess-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-sess-01: "Token leaked via URL/Referer/logs bypasses entropy protections entirely — even a well-generated token from SESS-01 becomes directly stealable through disclosure channels (High)"
+  wstg-sess-02: "Token exposure via URL/Referer/server logs bypasses HttpOnly cookie protections entirely — even a properly-flagged cookie is exfiltrated without any XSS (High)"
 ---
 
 # wstg-sess-04
@@ -305,6 +307,45 @@ tester.generate_report()
 
 ---
 
+## Tools
+
+| Tool                  | Description                    | Usage                                       |
+| ---------------------- | ------------------------------- | -------------------------------------------- |
+| **Burp Suite**         | Proxy/history analysis          | Search history for `session`/`token` in URLs |
+| **OWASP ZAP**          | Automated scanner + HUD         | Passive scan flags tokens in GET params      |
+| **waybackurls / gau**  | Archived URL discovery          | Find historically leaked session URLs        |
+| **Browser DevTools**   | Network/Application tabs        | Inspect localStorage/sessionStorage/Referer  |
+| **grep / ripgrep**     | Log and response analysis       | Search access logs for token patterns        |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+# Search Burp/ZAP saved history or raw logs for tokens leaked in URLs
+grep -EoiR "(session(id)?|token|sid|jsessionid|phpsessid)=[a-z0-9._-]{8,}" /path/to/access.log
+
+# Find archived URLs that may contain leaked session identifiers
+echo "target.com" | gau | grep -iE "session|token|sid=" | sort -u
+
+# Check if session token leaks to third-party resources via Referer
+curl -s -b "SESSIONID={session}" "https://{target}/dashboard" \
+    | grep -oP 'https?://(?!{target})[^"'"'"'\s>]+' \
+    | sort -u
+
+# Confirm Referrer-Policy is not leaking full URL cross-origin
+curl -sI "https://{target}/dashboard" | grep -i "referrer-policy"
+
+# Verify Cache-Control prevents caching of pages that render session data
+curl -sI -b "SESSIONID={session}" "https://{target}/dashboard" | grep -i "cache-control\|pragma"
+
+# Trigger a verbose error and grep the response for token leakage
+curl -s -b "SESSIONID=<script>alert(1)</script>" "https://{target}/dashboard" \
+    | grep -iE "sessionid|token|trace|stack"
+```
+
+---
+
 ## Remediation Guide
 
 ### 1. Prevent URL Session Exposure
@@ -370,6 +411,14 @@ location /dashboard {
 | **CWE-598** | Use of GET Request Method with Sensitive Query Strings |
 | **CWE-200** | Exposure of Sensitive Information                      |
 | **CWE-532** | Insertion of Sensitive Info into Log File              |
+
+---
+
+## References
+
+- [OWASP WSTG - Testing for Exposed Session Variables](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/06-Session_Management_Testing/04-Testing_for_Exposed_Session_Variables)
+- [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
+- [MDN Referrer-Policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy)
 
 
 ---

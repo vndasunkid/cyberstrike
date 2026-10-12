@@ -89,12 +89,12 @@ export namespace Config {
       cve: {
         type: "local",
         command: ["npx", "-y", "cve-mcp"],
-        enabled: false,
+        enabled: true,
       },
       osint: {
         type: "local",
         command: ["npx", "-y", "osint-mcp-server"],
-        enabled: false,
+        enabled: true,
       },
       "cloud-audit": {
         type: "local",
@@ -103,7 +103,7 @@ export namespace Config {
       },
       hackbrowser: {
         type: "local",
-        command: ["npx", "-y", "hackbrowser-mcp"],
+        command: ["bun", "run", "/home/master/code/hackbrowser-mcp/src/index.ts", "--mcp"],
         enabled: false,
       },
       // --- Tier 2: Extended Intelligence ---
@@ -115,7 +115,7 @@ export namespace Config {
       "dns-security": {
         type: "local",
         command: ["npx", "-y", "dns-security-mcp"],
-        enabled: false,
+        enabled: true,
       },
       "supply-chain": {
         type: "local",
@@ -1080,6 +1080,10 @@ export namespace Config {
             .describe(
               "Timeout in milliseconds for requests to this provider. Default is 300000 (5 minutes). Set to false to disable timeout.",
             ),
+          tlsRejectUnauthorized: z
+            .boolean()
+            .optional()
+            .describe("Set to false to allow self-signed or invalid TLS certificates."),
         })
         .catchall(z.any())
         .optional(),

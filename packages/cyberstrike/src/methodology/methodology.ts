@@ -101,27 +101,33 @@ export namespace Methodology {
       )
     })
 
-    if (matching.length >= def.minDeliverables && matching.length > 0)
+    // Breadth is measured in DISTINCT assets, not raw tagged-entry count
+    // (plan_A2.md) — several notes logged against the same endpoint must not
+    // count as several deliverables, or a breadth floor like active_recon's
+    // is trivially gamed without actually finding more endpoints.
+    const distinctAssets = new Set(matching.map((e) => e.asset)).size
+
+    if (distinctAssets >= def.minDeliverables && matching.length > 0)
       return {
         completed: true,
-        evidence: `${matching.length} entries with required tags`,
-        deliverableCount: matching.length,
+        evidence: `${distinctAssets} distinct assets with required tags`,
+        deliverableCount: distinctAssets,
       }
 
     // For phases with minDeliverables=0, check related VRT categories
     if (def.minDeliverables === 0 && def.relatedVrtCategories.length > 0) {
       const hasTaggedEntry = matching.length > 0
       if (hasTaggedEntry)
-        return { completed: true, evidence: `${matching.length} tagged entries`, deliverableCount: matching.length }
+        return { completed: true, evidence: `${distinctAssets} tagged assets`, deliverableCount: distinctAssets }
     }
 
     return {
       completed: false,
       evidence:
         matching.length > 0
-          ? `${matching.length}/${def.minDeliverables} deliverables`
+          ? `${distinctAssets}/${def.minDeliverables} distinct assets`
           : `No entries with tags: ${def.requiredTags.join(", ")}`,
-      deliverableCount: matching.length,
+      deliverableCount: distinctAssets,
     }
   }
 
@@ -359,7 +365,7 @@ export namespace Methodology {
       passive_recon:
         "Perform passive reconnaissance: DNS records, WHOIS, certificate transparency, Wayback Machine, Google dorking. Log all subdomains and services via add_intel with tag 'passive-recon'.",
       active_recon:
-        "Run active enumeration: port scanning, service detection, directory bruteforcing, crawler. Log live hosts and endpoints via add_intel with tag 'active-recon'.",
+        "Run active enumeration: port scanning, service detection, directory bruteforcing, crawler, JS-bundle route extraction, hidden-route grep. Log EVERY distinct live host/endpoint found via add_intel with tag 'active-recon' — this phase requires at least 8 distinct endpoints/hosts before it counts as complete, not just the first one found. Do not move to testing phases with a shallow endpoint list.",
       technology_profiling:
         "Identify technology stack: frameworks, CMS, server software, JavaScript libraries. Log each technology via add_intel with tag 'technology'. Check for known CVEs.",
       authentication_testing:

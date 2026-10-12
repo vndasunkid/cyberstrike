@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [authentication, login, credentials, mfa, wstg, athn]
 tech_stack: []
 cwe_ids: [CWE-640]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-athn-01, wstg-athn-03]
+prerequisites: [wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-athn-03: "Default Credentials + Weak Lockout = unlimited automated login attempts against default-credential lists across every account (Mass Account Takeover, Critical)"
 ---
 
 # wstg-athn-02

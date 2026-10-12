@@ -63,6 +63,21 @@ Test: Access endpoint with invalid/expired token
 Test: Access endpoint with "null", "undefined", "admin" as token
 ```
 
+**Forged-token Privilege Escalation (when NO admin credential is available)**
+Do NOT give up on an admin-only path just because you only hold a low-priv token.
+Forge a higher-privilege token and retry — this is how admin sections fall:
+```
+1. Decode the JWT you have (header.payload.signature).
+2. Elevate a role/priv claim in the payload: role="admin", isAdmin=true, email=admin.
+3a. alg:none  — set header alg="none", drop the signature (keep trailing dot).
+3b. HS256 confusion — if the server exposes/uses a public RSA key, re-sign HS256
+    with that public key as the HMAC secret; also try weak/known secrets.
+4. Re-request the admin-only endpoint/route with the forged token.
+```
+Vulnerable: the forged token is accepted (200 + admin data / admin function runs).
+Pair this with any `/admin`, `/administration`, `/manage`, `/metrics` route the
+recon surfaced.
+
 ## Testing Patterns
 
 ### Pattern 1: Remove Authentication

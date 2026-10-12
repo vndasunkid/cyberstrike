@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [authentication, login, credentials, mfa, wstg, athn]
 tech_stack: []
 cwe_ids: [CWE-521]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-athn-01, wstg-athn-02]
+prerequisites: [wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-athn-01: "Weak Password Reset Token + Cleartext Credential Transport = the reset token (often carried in the URL/Referer) is exposed to network sniffing the same way login credentials are, letting an on-path attacker hijack the entire reset flow and permanently take over the account rather than just the current session (Critical)"
+  wstg-athn-02: "Weak Password Reset (user enumeration via the reset endpoint) + Default Credentials = the reset flow confirms which accounts still use default credentials, and the same predictable reset process lets the attacker fully take over those accounts by setting a new password — sidestepping any lockout that only protects the login form (Critical)"
 ---
 
 # wstg-athn-09

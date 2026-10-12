@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [business-logic, workflow, abuse, wstg, busl]
 tech_stack: []
 cwe_ids: [CWE-840]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-busl-01, wstg-busl-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-busl-01: "Skipping the payment step in a multi-step workflow combined with accepted business-logic violations elsewhere (unlimited quantity, negative price) lets an attacker receive unlimited high-value goods entirely for free, not just a single bypassed payment (Critical)"
+  wstg-busl-02: "Workflow steps gated only by guessable/sequential checkout or state IDs (forgeable requests) let an attacker jump directly into the 'confirmed'/'delivered' step of ANY user's workflow, not just their own — a personal bypass becomes cross-account exploitation (Critical)"
 ---
 
 # wstg-busl-06

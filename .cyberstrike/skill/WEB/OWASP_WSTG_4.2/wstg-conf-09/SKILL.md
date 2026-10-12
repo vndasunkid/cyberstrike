@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [misconfiguration, hardening, server, wstg, conf]
 tech_stack: [php, java, asp, nodejs]
 cwe_ids: [CWE-434]
-chains_with: []
+chains_with: [wstg-conf-01, wstg-conf-02]
 prerequisites: []
-severity_boost: {}
+severity_boost:
+  wstg-conf-01: "World-Readable Credentials/Keys + Exposed Admin/SSH Interface = Direct Infrastructure Compromise (Critical)"
 ---
 
 # wstg-conf-09

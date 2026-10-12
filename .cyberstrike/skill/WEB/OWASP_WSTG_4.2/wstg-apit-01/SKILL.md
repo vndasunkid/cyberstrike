@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [api, rest, graphql, soap, wstg, apit]
 tech_stack: [rest, graphql, soap, grpc]
 cwe_ids: [CWE-200]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-apit-02, wstg-apit-00]
+prerequisites: [wstg-conf-03, wstg-conf-06]
+severity_boost:
+  wstg-apit-02: "A full endpoint/schema map from recon combined with confirmed BOLA lets an attacker systematically exfiltrate every object type at scale, turning an isolated finding into a mass data breach (Critical)"
 ---
 
 # wstg-apit-01
@@ -232,6 +233,95 @@ recon.generate_report()
 | **Kiterunner** | API endpoint discovery |
 | **Postman**    | API documentation      |
 
+
+---
+
+## Example Commands/Payloads
+
+### Ready-to-Use Recon Cheat Sheet
+
+```bash
+TARGET="{target}"
+
+# Documentation/spec discovery sweep
+for p in swagger.json swagger/v1/swagger.json api-docs api/docs openapi.json \
+         openapi/v3/api-docs .well-known/openapi.json api/swagger redoc graphql; do
+  code=$(curl -s -o /dev/null -w "%{http_code}" "https://$TARGET/$p")
+  [ "$code" != "404" ] && echo "[FOUND] /$p -> $code"
+done
+
+# Endpoint fuzzing with Kiterunner (uses Swagger/API wordlists + smart routing)
+kr scan "https://$TARGET" -w routes-large.kite -x 20
+
+# ffuf endpoint bruteforce
+ffuf -u "https://$TARGET/api/FUZZ" \
+    -w /usr/share/wordlists/seclists/Discovery/Web-Content/api/api-endpoints.txt \
+    -mc 200,201,204,301,302,401,403 -o api-endpoints.json
+
+# API version enumeration
+for v in v1 v2 v3 v4 v1.0 v2.0; do
+  curl -s -o /dev/null -w "/api/$v/users -> %{http_code}\n" "https://$TARGET/api/$v/users"
+done
+
+# Extract endpoints and parameter names from JS bundles
+curl -s "https://$TARGET/main.js" | grep -oP '/api/[a-zA-Z0-9/_-]+' | sort -u
+curl -s "https://$TARGET/main.js" | grep -oP '["'"'"'][a-zA-Z_]{3,}["'"'"']\s*:' | sort -u
+
+# Parameter discovery on a known endpoint
+arjun -u "https://$TARGET/api/users" -oT arjun-params.txt
+
+# Verbose error probing for stack traces / info disclosure
+curl -s "https://$TARGET/api/users/invalid_id" | grep -iE "stack trace|exception|sql|debug"
+```
+
+### Detection Patterns
+
+| Signal                                        | Meaning                                |
+| ------------------------------------------------ | ------------------------------------------- |
+| `200` on a doc/spec path                          | Full endpoint map disclosed — enumerate it   |
+| Non-`404` status across sequential version prefixes | Deprecated/undocumented API version reachable |
+| Stack trace / SQL text in error response           | Verbose error handling — info disclosure     |
+| New parameter names found via Arjun not in docs     | Hidden/undocumented parameters — retest for mass assignment |
+
+---
+
+## Remediation Guide
+
+- **Restrict documentation access**: require authentication for Swagger/OpenAPI/GraphQL introspection endpoints in staging and production, or disable them entirely outside development.
+- **Decommission old versions cleanly**: fully remove (404, not just unlink) deprecated API versions instead of leaving them reachable alongside the current one.
+- **Sanitize error responses**: return generic error messages in production; log stack traces/SQL errors server-side only, never in the HTTP response body.
+- **Strip framework fingerprints**: remove/override `Server`, `X-Powered-By`, and similar version-disclosing headers.
+- **Monitor for enumeration**: rate-limit and alert on high-volume 401/403/404 sequences that indicate endpoint fuzzing.
+
+---
+
+## Risk Assessment
+
+| Finding | CVSS | Severity |
+| --- | --- | --- |
+| Public, unauthenticated API doc (full schema disclosure) | 5.3 | Medium |
+| Deprecated/undocumented API version still reachable and vulnerable | 7.5 | High |
+| Stack trace / SQL error disclosed in response | 5.3 | Medium |
+| Framework/version fingerprint leaked via headers | 3.7 | Low |
+
+---
+
+## CWE Categories
+
+| CWE ID | Title | Description |
+| --- | --- | --- |
+| **CWE-200** | Exposure of Sensitive Information to an Unauthorized Actor | Full API schema/spec disclosed via unauthenticated docs endpoint |
+| **CWE-538** | Insertion of Sensitive Information into Externally-Accessible File or Directory | Swagger/OpenAPI files left publicly accessible |
+| **CWE-209** | Generation of Error Message Containing Sensitive Information | Stack traces/SQL errors in API responses |
+
+---
+
+## References
+
+- [OWASP API Security Top 10](https://owasp.org/API-Security/)
+- [OWASP WSTG - API Testing](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/11-API_Testing/)
+- [Kiterunner - API Endpoint Discovery](https://github.com/assetnote/kiterunner)
+- [SecLists API Wordlists](https://github.com/danielmiessler/SecLists/tree/master/Discovery/Web-Content/api)
 
 ---
 

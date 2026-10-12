@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [error-handling, information-leak, stack-trace, wstg, errh]
 tech_stack: []
 cwe_ids: [CWE-209]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-errh-02, wstg-info-01]
+prerequisites: [wstg-info-01, wstg-info-02]
+severity_boost:
+  wstg-errh-02: "Generic error disclosure (DB engine, file paths, framework fingerprints) combined with exposed stack traces/debug consoles (e.g., Werkzeug interactive debugger) turns passive information leakage into a direct, interactive remote code execution vector (Critical)"
 ---
 
 # wstg-errh-01
@@ -328,6 +329,43 @@ tester.generate_report()
 | **Burp Suite** | Error interception | Analyze responses |
 | **OWASP ZAP**  | Automated scanning | Error detection   |
 | **curl**       | Manual testing     | Trigger errors    |
+
+---
+
+## Example Commands/Payloads
+
+```bash
+TARGET="https://target.com"
+
+# Quick sweep: fire common error-triggering inputs and grep the response for leaks
+for payload in "'" "\"" ";" "../../etc/passwd" "%00" "{{7*7}}" "1 OR 1=1" "null" "-1"; do
+  echo "=== payload: $payload ==="
+  curl -s -o /tmp/errh_resp.html -w "status=%{http_code}\n" "$TARGET/api/search?q=$payload"
+  grep -iE "exception|traceback|stack trace|at [A-Za-z0-9_.]+\(.*:[0-9]+\)|sql syntax|ORA-[0-9]+|/var/www|/home/[a-z]+/|C:\\\\" /tmp/errh_resp.html
+done
+
+# Force a malformed body/type to trigger a parser-level 500
+curl -s -X POST "$TARGET/api/data" -H "Content-Type: application/json" -d '{invalid json' -w "\nstatus=%{http_code}\n"
+curl -s "$TARGET" -H "Content-Length: -1" -w "\nstatus=%{http_code}\n"
+
+# SQLi-flavored error probe (detection only, not exploitation)
+curl -s "$TARGET/api/user?id=1'" | grep -iE "sql|mysql_|ORA-[0-9]+|PLS-[0-9]+|SQLite|ODBC"
+
+# Path traversal / file-not-found error probe
+curl -s "$TARGET/download?file=../../../../etc/passwd" -w "\nstatus=%{http_code}\n"
+
+# HTTP method fuzzing for verbose 405/500 pages
+for m in OPTIONS PUT DELETE PATCH TRACE; do
+  echo "=== $m ==="; curl -s -X "$m" "$TARGET" -o /dev/null -w "status=%{http_code}\n"
+done
+```
+
+**Result patterns indicating a finding:**
+- Response body contains `Exception`, `Traceback (most recent call last)`, or `at <Class>.<method>(<File>:<line>)` → stack trace disclosure
+- Response contains `SQL syntax`, `ORA-\d+`, `PLS-\d+`, `mysql_`, `PG::`, `ODBC` → SQL error/DB fingerprint disclosure
+- Response contains `/var/www/`, `/home/<user>/`, `C:\`, or `/app/` → server file-path disclosure
+- Response headers/body reveal `X-Powered-By`, `Server: Apache/2.x`, `PHP/8.x`, `ASP.NET` version strings → technology/version disclosure
+- 500 responses differ in content/length across payload variants where a generic error page is expected → inconsistent/verbose error handling
 
 ---
 

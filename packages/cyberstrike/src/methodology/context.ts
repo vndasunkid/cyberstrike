@@ -230,10 +230,24 @@ export namespace MethodologyContext {
       }
     }
 
-    // Show top 3 untested items
-    if (coverage.untestedItems.length > 0) {
+    // Gate 2 (plan_A1.md §4.3): items with >=1 technique already logged are
+    // checks Gate 1 refused to close as tested_not_vulnerable — they need
+    // exactly one more distinct technique, not a fresh start. Surface these
+    // ahead of never-touched items since they're the cheapest coverage wins
+    // and are otherwise invisible in the raw completion percentage.
+    const needsOneMore = coverage.untestedItems.filter((i) => i.techniquesAttempted >= 1)
+    const neverTouched = coverage.untestedItems.filter((i) => i.techniquesAttempted === 0)
+
+    if (needsOneMore.length > 0) {
+      lines.push(`${needsOneMore.length} check(s) held open by Gate 1 — try ONE more distinct technique to close:`)
+      for (const item of needsOneMore.slice(0, 3)) {
+        lines.push(`  - ${item.entryTitle}: ${item.vrtCategory} (${item.asset}) — 1 technique tried, needs a 2nd`)
+      }
+    }
+
+    if (neverTouched.length > 0) {
       lines.push("Untested priorities:")
-      for (const item of coverage.untestedItems.slice(0, 3)) {
+      for (const item of neverTouched.slice(0, 3)) {
         lines.push(`  - ${item.entryTitle}: ${item.vrtCategory} (${item.asset})`)
       }
     }

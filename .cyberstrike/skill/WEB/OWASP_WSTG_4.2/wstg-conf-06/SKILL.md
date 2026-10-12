@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [misconfiguration, hardening, server, wstg, conf]
 tech_stack: []
 cwe_ids: [CWE-200]
-chains_with: []
+chains_with: [wstg-conf-03, wstg-conf-07]
 prerequisites: []
-severity_boost: {}
+severity_boost:
+  wstg-conf-03: "PUT Method Enabled + Executable File Extension Handling = Webshell Upload to RCE (Critical)"
 ---
 
 # wstg-conf-06

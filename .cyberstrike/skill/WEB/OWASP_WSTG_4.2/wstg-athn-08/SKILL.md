@@ -8,9 +8,11 @@ author: cyberstrike-official
 tags: [authentication, login, credentials, mfa, wstg, athn]
 tech_stack: []
 cwe_ids: [CWE-287]
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-athn-05, wstg-athn-07]
+prerequisites: [wstg-idnt-01, wstg-idnt-02]
+severity_boost:
+  wstg-athn-05: "Weak Security Question Answer + Vulnerable Remember-Me Token = guessing the security question resets/recovers the account, and a predictable remember-me token then lets the attacker retain silent access even after the legitimate owner notices and changes their password (Persistent Silent Account Takeover, Critical)"
+  wstg-athn-07: "Weak Security Question Answer + Weak Password Policy = a correctly guessed security answer lets the attacker set the account's new password directly through the recovery flow, and a weak password policy means that attacker-chosen password is never flagged or forced to rotate, letting the takeover persist indefinitely undetected (Undetected Permanent Account Takeover, High)"
 ---
 
 # wstg-athn-08

