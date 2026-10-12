@@ -50,12 +50,12 @@ export const WebLoginTool = Tool.define("web_login", {
     role_name: z.string().optional().describe("Role to link this credential to (e.g. admin, customer)"),
     role_level: z.number().optional().describe("Role hierarchy level (higher = more privileged)"),
   }),
-  async execute(params, ctx) {
+  async execute(params, ctx): Promise<{ title: string; output: string; metadata: { ok: boolean; status: number; credential_id?: string } }> {
     const sessionID = Session.root(ctx.sessionID)
 
     const url = params.login_url
     if (!/^https?:\/\//i.test(url)) {
-      return { title: "Error: invalid login_url", output: "login_url must be an absolute http(s) URL", metadata: { ok: false, status: 0, credential_id: undefined } }
+      return { title: "Error: invalid login_url", output: "login_url must be an absolute http(s) URL", metadata: { ok: false, status: 0 } }
     }
 
     const method = (params.method ?? "POST").toUpperCase()
@@ -69,7 +69,7 @@ export const WebLoginTool = Tool.define("web_login", {
         body: method === "GET" || method === "HEAD" ? undefined : JSON.stringify(params.body ?? {}),
       })
     } catch (e) {
-      return { title: "Error: login request failed", output: String(e), metadata: { ok: false, status: 0, credential_id: undefined } }
+      return { title: "Error: login request failed", output: String(e), metadata: { ok: false, status: 0 } }
     }
 
     const rawText = await res.text()
@@ -111,7 +111,7 @@ export const WebLoginTool = Tool.define("web_login", {
       return {
         title: "Login produced no usable credential",
         output: `HTTP ${res.status}. No token found at token_path "${params.token_path ?? "(none)"}" and no Set-Cookie captured.\nResponse (first 400 chars):\n${rawText.slice(0, 400)}`,
-        metadata: { ok: false, status: res.status, credential_id: undefined },
+        metadata: { ok: false, status: res.status },
       }
     }
 
