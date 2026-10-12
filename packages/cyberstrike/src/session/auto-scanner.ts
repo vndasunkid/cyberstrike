@@ -298,7 +298,7 @@ async function zipSlipScan(input: ScanInput): Promise<void> {
     for (const target of TRAVERSAL_TARGETS) {
       const zipBytes = createZipWithEntry(target.entry, content)
       const formData = new FormData()
-      const blob = new Blob([zipBytes], { type: "application/zip" })
+      const blob = new Blob([new Uint8Array(zipBytes) as BlobPart], { type: "application/zip" })
       formData.append("file", blob, "test.zip")
 
       const uploadRes = await safeFetch(input.target + uploadPath, "POST", {
@@ -338,7 +338,7 @@ async function zipSlipScan(input: ScanInput): Promise<void> {
         if (origContent) {
           const restoreZip = createZipWithEntry(target.entry, new TextEncoder().encode(origContent))
           const restoreForm = new FormData()
-          restoreForm.append("file", new Blob([restoreZip], { type: "application/zip" }), "restore.zip")
+          restoreForm.append("file", new Blob([new Uint8Array(restoreZip) as BlobPart], { type: "application/zip" }), "restore.zip")
           await safeFetch(input.target + uploadPath, "POST", { headers: authHeaders, body: restoreForm })
         }
         return

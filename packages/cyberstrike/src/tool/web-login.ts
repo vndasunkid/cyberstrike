@@ -55,7 +55,7 @@ export const WebLoginTool = Tool.define("web_login", {
 
     const url = params.login_url
     if (!/^https?:\/\//i.test(url)) {
-      return { title: "Error: invalid login_url", output: "login_url must be an absolute http(s) URL", metadata: { ok: false } }
+      return { title: "Error: invalid login_url", output: "login_url must be an absolute http(s) URL", metadata: { ok: false, status: 0, credential_id: undefined } }
     }
 
     const method = (params.method ?? "POST").toUpperCase()
@@ -69,7 +69,7 @@ export const WebLoginTool = Tool.define("web_login", {
         body: method === "GET" || method === "HEAD" ? undefined : JSON.stringify(params.body ?? {}),
       })
     } catch (e) {
-      return { title: "Error: login request failed", output: String(e), metadata: { ok: false } }
+      return { title: "Error: login request failed", output: String(e), metadata: { ok: false, status: 0, credential_id: undefined } }
     }
 
     const rawText = await res.text()
@@ -111,7 +111,7 @@ export const WebLoginTool = Tool.define("web_login", {
       return {
         title: "Login produced no usable credential",
         output: `HTTP ${res.status}. No token found at token_path "${params.token_path ?? "(none)"}" and no Set-Cookie captured.\nResponse (first 400 chars):\n${rawText.slice(0, 400)}`,
-        metadata: { ok: false, status: res.status },
+        metadata: { ok: false, status: res.status, credential_id: undefined },
       }
     }
 
@@ -199,7 +199,7 @@ export const WebLoginTool = Tool.define("web_login", {
     return {
       title: `${refreshed ? "Refreshed" : "Logged in and registered"} credential "${cred.label}" (HTTP ${res.status}) — ${retestsQueued} authenticated retests queued`,
       output: JSON.stringify(out, null, 2),
-      metadata: { ok: true, credential_id: cred.id },
+      metadata: { ok: true, status: res.status, credential_id: cred.id },
     }
   },
 })
