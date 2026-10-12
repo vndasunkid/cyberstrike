@@ -111,6 +111,7 @@ const TITLE_SIGNATURES: [string, RegExp][] = [
   ["authn", /default.*cred|brute[- ]?force|rate limit|password policy|account lockout|session fixation|weak password/i],
   ["authz", /broken access control|privilege escalation|unauthenticated access to|open redirect/i],
   ["business-logic", /race condition|negative amount|workflow bypass|forged coupon|weak crypto|predictable token/i],
+  ["info-disclosure", /information disclosure|file disclosure|sensitive data exposure|directory listing|backup file|source code disclosure|exposed.*file|internal ip|stack trace|error message|debug|verbose error/i],
 ]
 export function classifyFindingTitle(title: string): string | null {
   const s = (title ?? "").toLowerCase()
